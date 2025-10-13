@@ -16,6 +16,8 @@ from src.utils.cad_validator import CADCodeValidator, ValidationResult
 from src.processors.cad_code_generator import CADCodeGenerator
 from src.services.drawing_storage_service import DrawingStorageService
 from src.services.storage_service import geometric_storage
+from src.services.image_analyzer import ImageAnalyzerService
+from src.services.room_matcher import RoomMatcher, MatchingResult
 
 logger = logging.getLogger("demoplan.agents.drawing_generation")
 
@@ -372,16 +374,16 @@ class DrawingGenerationAgent:
             logger.info("=" * 80)
             logger.info("STEP 3: Attempting GEOMETRIC extraction (from GCS)...")
             logger.info("=" * 80)
-            
+
             geometric_result = await self._try_geometric_extraction(session_id, file_analyses)
-            
+
             if geometric_result:
                 logger.info("✅ SUCCESS: Geometric extraction complete")
                 logger.info(f"   Source: DXF closed polylines from GCS")
                 logger.info(f"   Rooms found: {len(geometric_result.get('rooms', []))}")
                 logger.info(f"   Total area: {geometric_result.get('total_area', 0)} m²")
                 logger.info(f"   Precision: HIGH (from actual geometry)")
-                
+
                 return {
                     "session_id": session_id,
                     "spatial_data": geometric_result,
@@ -389,22 +391,47 @@ class DrawingGenerationAgent:
                     "precision": "high",
                     "project_data": session_doc.get("project_data_summary", {})
                 }
-            
-            # STEP 4: Fall back to TEXT-BASED extraction (from Firestore summaries)
+
+            # ✅ NEW STEP 3.5: Try IMAGE-BASED extraction (spec + image pair)
             logger.warning("⚠️ Geometric extraction failed - no room boundaries found")
+            logger.info("=" * 80)
+            logger.info("STEP 3.5: Attempting IMAGE-BASED extraction (spec + image)...")
+            logger.info("=" * 80)
+
+            image_result = await self._try_image_based_extraction(session_id, file_analyses)
+
+            if image_result and image_result.get("rooms"):
+                logger.info("✅ SUCCESS: Image-based extraction complete")
+                logger.info(f"   Source: Specification + Floor plan image")
+                logger.info(f"   Rooms matched: {len(image_result['rooms'])}")
+                logger.info(f"   Matching confidence: {image_result.get('matching_confidence', 0):.1%}")
+                logger.info(f"   Total area: {image_result.get('total_area', 0):.2f} m²")
+                logger.info(f"   Precision: MEDIUM-HIGH (spec dimensions + image validation)")
+
+                return {
+                    "session_id": session_id,
+                    "spatial_data": image_result,
+                    "source_type": "image_hybrid",
+                    "precision": "medium_high",
+                    "matching_details": image_result.get("matching_details", {}),
+                    "project_data": session_doc.get("project_data_summary", {})
+                }
+
+            # STEP 4: Fall back to TEXT-BASED extraction (from Firestore summaries)
+            logger.warning("⚠️ Image-based extraction failed - no spec+image pair found")
             logger.info("=" * 80)
             logger.info("STEP 4: Falling back to TEXT-BASED extraction...")
             logger.info("=" * 80)
-            
+
             text_result = await self._try_text_based_extraction(session_id, file_analyses)
-            
+
             if text_result and text_result.get("rooms"):
                 logger.info("✅ SUCCESS: Text-based extraction complete")
                 logger.info(f"   Source: analysis_summary from Firestore")
                 logger.info(f"   Rooms found: {len(text_result['rooms'])}")
                 logger.info(f"   Total area: {text_result['total_area']:.2f} m²")
                 logger.warning("   ⚠️ Precision: APPROXIMATE (generated from text)")
-                
+
                 return {
                     "session_id": session_id,
                     "spatial_data": text_result,
@@ -541,6 +568,123 @@ class DrawingGenerationAgent:
         
         logger.warning("   ❌ No geometric data found in any file")
         return None
+
+
+    async def _try_image_based_extraction(
+        self,
+        session_id: str,
+        file_analyses: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        NEW METHOD: Extract spatial data from specification + image combination
+        
+        This method implements the hybrid image-based extraction feature:
+        1. Finds specification file (DXF or PDF with room schedule)
+        2. Finds floor plan image (JPG, PNG)
+        3. Matches rooms between spec and image using RoomMatcher
+        4. Combines precise spec dimensions with image-validated layout
+        
+        Args:
+            session_id: Session identifier
+            file_analyses: List of analyzed files from session
+        
+        Returns:
+            Spatial data dictionary with matched rooms, or None if extraction fails
+        """
+        try:
+            logger.info("   🔍 Looking for specification + image pair...")
+            
+            # Find specification files (DXF or PDF)
+            spec_files = [
+                f for f in file_analyses 
+                if f.get('file_type') in ['dxf', 'pdf'] and 
+                f.get('status') == 'processed'
+            ]
+            
+            # Find image files
+            image_files = [
+                f for f in file_analyses 
+                if f.get('file_type') == 'image' and 
+                f.get('status') == 'processed'
+            ]
+            
+            logger.info(f"   Found: {len(spec_files)} spec file(s), {len(image_files)} image(s)")
+            
+            # Need at least one of each
+            if not spec_files or not image_files:
+                logger.info("   ❌ Missing spec+image pair, skipping image extraction")
+                return None
+            
+            logger.info("   ✅ Spec + image pair found! Attempting hybrid extraction...")
+            
+            # Extract room data from specification
+            spec_file = spec_files[0]  # Use first spec file
+            spec_rooms = await self._extract_spec_rooms(spec_file)
+            
+            if not spec_rooms or not spec_rooms.get('rooms'):
+                logger.warning("   ❌ No rooms found in specification file")
+                return None
+            
+            logger.info(f"   Spec rooms extracted: {len(spec_rooms['rooms'])}")
+            
+            # Extract labels from image
+            image_file = image_files[0]  # Use first image file
+            image_analysis = image_file.get('image_analysis', {})
+            
+            # Get room labels from image
+            room_labels_data = image_analysis.get('room_labels', [])
+            image_labels = [label['text'] for label in room_labels_data]
+            
+            # Also try all text annotations if no specific room labels
+            if not image_labels:
+                image_labels = image_analysis.get('all_text_annotations', [])
+            
+            if not image_labels:
+                logger.warning("   ❌ No text labels found in image")
+                return None
+            
+            logger.info(f"   Image labels extracted: {len(image_labels)}")
+            logger.info(f"   Labels: {', '.join(image_labels[:5])}")
+            
+            # Match rooms using RoomMatcher
+            logger.info("   🎯 Starting room matching process...")
+            matcher = RoomMatcher(
+                similarity_threshold=0.6,
+                area_tolerance=0.15
+            )
+            
+            matching_result = matcher.match_rooms(
+                spec_rooms=spec_rooms['rooms'],
+                image_labels=image_labels,
+                enable_area_matching=True
+            )
+            
+            # Log matching results
+            logger.info(f"   ✅ Matching complete:")
+            logger.info(f"      Matched: {matching_result.matched_count}/{matching_result.total_spec_rooms}")
+            logger.info(f"      Confidence: {matching_result.overall_confidence:.1%}")
+            
+            if matching_result.warnings:
+                for warning in matching_result.warnings:
+                    logger.warning(f"      ⚠️ {warning}")
+            
+            # Check if matching quality is acceptable
+            if matching_result.overall_confidence < 0.4:
+                logger.warning("   ❌ Matching confidence too low, rejecting image extraction")
+                return None
+            
+            # Build spatial data from matched rooms
+            spatial_data = self._build_spatial_data_from_matches(
+                matching_result,
+                spec_rooms,
+                image_analysis
+            )
+            
+            return spatial_data
+            
+        except Exception as e:
+            logger.error(f"   ❌ Image-based extraction failed: {e}", exc_info=True)
+            return None
 
     async def _load_geometric_data_from_gcs(
         self,

@@ -373,18 +373,74 @@ async def upload_files(
                             storage_breakdown["firestore"].remove(item)
                             break
 
+        # ✅ NEW: Detect file types and check for image+spec pair
+        file_type_counts: Dict[str, int] = {}
+        has_spec = False
+        has_image = False
+
+        for file_data in files_data:
+            content_type = file_data.get('content_type', '') or ''
+            filename = file_data.get('filename', '') or ''
+
+            # Categorize file
+            if content_type.startswith('image/'):
+                file_type = 'layout_image'
+                has_image = True
+            elif content_type == 'application/dxf' or filename.lower().endswith('.dxf'):
+                file_type = 'dxf_specification'
+                has_spec = True
+            elif content_type == 'application/pdf' or filename.lower().endswith('.pdf'):
+                file_type = 'pdf_specification'
+                has_spec = True
+            else:
+                file_type = 'other'
+
+            file_type_counts[file_type] = file_type_counts.get(file_type, 0) + 1
+
+        # Check if hybrid analysis is available
+        hybrid_analysis_available = has_spec and has_image
+
+        # Generate appropriate message
+        if hybrid_analysis_available:
+            upload_message = (
+                f"✅ Specification + layout image detected! "
+                f"Enhanced drawing generation with image validation available."
+            )
+        else:
+            upload_message = f"✅ {len(files_data)} fișiere analizate cu succes."
+
+        # Log hybrid capability
+        if hybrid_analysis_available:
+            logger.info("🎯 HYBRID ANALYSIS AVAILABLE: Spec + Image pair detected")
+            logger.info(f"   Specifications: {file_type_counts.get('dxf_specification', 0) + file_type_counts.get('pdf_specification', 0)}")
+            logger.info(f"   Images: {file_type_counts.get('layout_image', 0)}")
+
         return {
             "session_id": session_id,
             "files_uploaded": len(files_data),
             "storage_type": storage_type,
-            "storage_breakdown": storage_breakdown,  # NEW
-            "geometric_split_count": geometric_split_count,  # NEW
+            "storage_breakdown": storage_breakdown,
+            "geometric_split_count": geometric_split_count,
+
+            # ✅ NEW: File type information
+            "file_types": file_type_counts,
+            "hybrid_analysis_available": hybrid_analysis_available,
+
             "analysis": {
                 "confidence": session.confidence_score,
                 "can_generate_offer": session.can_generate_offer,
             },
             "ai_response": analysis_result.get("response", "Fișiere analizate cu succes."),
-            "message": f"✅ {len(files_data)} fișiere analizate cu succes (Stocare: {storage_type}, GCS split: {geometric_split_count})"  # UPDATED
+
+            # ✅ NEW: Enhanced message
+            "message": upload_message,
+
+            # ✅ NEW: Feature availability
+            "features": {
+                "geometric_extraction": geometric_split_count > 0,
+                "image_based_extraction": hybrid_analysis_available,
+                "text_based_extraction": True
+            }
         }
 
     except HTTPException:

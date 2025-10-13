@@ -69,6 +69,7 @@ from src.services.firestore_service import FirestoreService
 from src.services.ocr_storage_service import OCRStorageService
 from src.services.file_storage_service import file_storage_service
 from src.services.storage_service import geometric_storage
+from src.services.image_analyzer import ImageAnalyzerService, ImageAnalysisResult
 
 class AgentMode(Enum):
     """Operating modes for the unified agent"""
@@ -466,10 +467,24 @@ class UnifiedConstructionAgent:
             return single_file_result
 
         try:
+            # ✅ NEW: Image handling for common image MIME types
+            content_type = file_info.get("content_type", "") or ""
+            if content_type.startswith("image/") or filename.endswith(('.png', '.jpg', '.jpeg', '.webp', '.tiff')):
+                # Delegate to image processing method
+                image_result = await self._process_image_file(file_info)
+                # Merge image_result into single_file_result structure
+                single_file_result.update({
+                    "file_type": "image",
+                    "confidence_contribution": image_result.get("analysis_summary", {}).get("confidence", 0.0) if isinstance(image_result.get("analysis_summary", {}), dict) else 0.0,
+                    "image_analysis_result": image_result.get("image_analysis"),
+                    "analysis_summary": image_result.get("analysis_summary", {})
+                })
+                return single_file_result
+
             from src.processors.dxf_analyzer import UnifiedDocumentProcessor
             document_processor = UnifiedDocumentProcessor()
             document_result = document_processor.process_document(filename, content)
-            
+
             if not document_result:
                 raise ValueError("Document processor returned None")
 
@@ -558,6 +573,107 @@ class UnifiedConstructionAgent:
             })
         
         return transformed
+
+    async def _process_image_file(self, file_info: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process uploaded floor plan image using Google Vision AI
+        
+        NEW METHOD for image-based layout extraction feature.
+        Analyzes images to extract room labels and spatial information.
+        
+        Args:
+            file_info: Dictionary containing file data
+                - file_id: Unique identifier
+                - filename: Original filename
+                - content: Raw image bytes
+                - content_type: MIME type (image/jpeg, image/png)
+                - size: File size in bytes
+        
+        Returns:
+            Dictionary with image analysis results
+        """
+        try:
+            file_id = file_info['file_id']
+            filename = file_info['filename']
+            content = file_info['content']
+            content_type = file_info['content_type']
+            
+            logger.info(f"🖼️  Processing image file: {filename}")
+            logger.info(f"   File ID: {file_id}")
+            logger.info(f"   Content type: {content_type}")
+            logger.info(f"   Size: {len(content) / 1024:.1f} KB")
+            
+            # Initialize image analyzer
+            analyzer = ImageAnalyzerService()
+            
+            # Analyze floor plan image
+            analysis_result = await analyzer.analyze_floor_plan(
+                image_content=content,
+                filename=filename,
+                min_confidence=0.5
+            )
+            
+            # Convert to dictionary for storage
+            image_analysis_dict = analyzer.to_dict(analysis_result)
+            
+            # Create analysis summary
+            analysis_summary = {
+                'type': 'image',
+                'room_labels_found': len(analysis_result.room_labels),
+                'total_text_annotations': len(analysis_result.all_text_annotations),
+                'objects_detected': len(analysis_result.detected_objects),
+                'confidence': analysis_result.confidence,
+                'quality_score': analysis_result.quality_score,
+                'warnings': analysis_result.warnings,
+                'image_dimensions': {
+                    'width': analysis_result.image_dimensions.width,
+                    'height': analysis_result.image_dimensions.height,
+                    'aspect_ratio': analysis_result.image_dimensions.aspect_ratio
+                },
+                'processing_time_ms': analysis_result.processing_time_ms,
+                'cost_estimate': analysis_result.cost_estimate
+            }
+            
+            logger.info(f"✅ Image analysis complete:")
+            logger.info(f"   Room labels: {len(analysis_result.room_labels)}")
+            logger.info(f"   Confidence: {analysis_result.confidence:.1%}")
+            logger.info(f"   Quality: {analysis_result.quality_score:.1%}")
+            
+            # Log warnings if any
+            if analysis_result.warnings:
+                for warning in analysis_result.warnings:
+                    logger.warning(f"   ⚠️ {warning}")
+            
+            return {
+                'file_id': file_id,
+                'filename': filename,
+                'file_type': 'image',
+                'content_type': content_type,
+                'size': len(content),
+                'status': 'processed',
+                'image_analysis': image_analysis_dict,
+                'analysis_summary': analysis_summary,
+                'analysis_data': {
+                    'type': 'image',
+                    'analysis_summary': analysis_summary,
+                    'full_analysis': image_analysis_dict
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Image processing failed for {filename}: {e}", exc_info=True)
+            return {
+                'file_id': file_info.get('file_id', 'unknown'),
+                'filename': file_info.get('filename', 'unknown'),
+                'file_type': 'image',
+                'status': 'failed',
+                'error': str(e),
+                'analysis_summary': {
+                    'type': 'image',
+                    'error': str(e),
+                    'confidence': 0.0
+                }
+            }
 
     async def generate_offer(self, session_id: str) -> Dict[str, Any]:
         """Generate professional Romanian construction offer"""
@@ -1546,6 +1662,24 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                 # ✅ NEW: Dimensions information
                 if analysis_summary.get("has_dimensions"):
                     file_context_parts.append(f"   - **Dimensiuni:** Plan cotat complet")
+            # ✅ NEW: Image file context
+            elif analysis_summary.get("type") == "image":
+                file_context_parts.append(f"   - Format: Floor plan image")
+                
+                room_labels = analysis_summary.get("room_labels_found", 0)
+                if room_labels > 0:
+                    file_context_parts.append(f"   - **Room labels detected: {room_labels}**")
+                
+                confidence = analysis_summary.get("confidence", 0)
+                quality = analysis_summary.get("quality_score", 0)
+                file_context_parts.append(f"   - Analysis confidence: {confidence:.0%}")
+                file_context_parts.append(f"   - Image quality: {quality:.0%}")
+                
+                warnings = analysis_summary.get("warnings", [])
+                if warnings:
+                    file_context_parts.append(f"   - ⚠️ Warnings: {len(warnings)}")
+                    for warning in warnings[:2]:  # Show first 2 warnings
+                        file_context_parts.append(f"     • {warning}")
             
             # ✅ COMPLETE PDF analysis
             elif analysis_summary.get("type") == "pdf":
