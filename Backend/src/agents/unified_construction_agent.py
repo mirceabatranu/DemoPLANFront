@@ -576,27 +576,44 @@ class UnifiedConstructionAgent:
 
     async def _process_image_file(self, file_info: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process uploaded floor plan image using Google Vision AI
-        
-        NEW METHOD for image-based layout extraction feature.
+        Process image files using Google Vision AI
+
         Analyzes images to extract room labels and spatial information.
-        
+
         Args:
             file_info: Dictionary containing file data
-                - file_id: Unique identifier
                 - filename: Original filename
                 - content: Raw image bytes
                 - content_type: MIME type (image/jpeg, image/png)
-                - size: File size in bytes
-        
+                - file_id: (Optional) Unique identifier - will be generated if not present
+
         Returns:
-            Dictionary with image analysis results
+            Dictionary with image analysis results (fully flattened for Firestore)
         """
+        # ✅ Extract filename FIRST before any operations that might fail
+        filename = file_info.get('filename', 'unknown_image')
+
         try:
-            file_id = file_info['file_id']
-            filename = file_info['filename']
-            content = file_info['content']
-            content_type = file_info['content_type']
+            # ✅ Generate file_id if not present in file_info
+            file_id = file_info.get('file_id')
+            if not file_id:
+                import uuid
+                file_id = str(uuid.uuid4())
+                file_info['file_id'] = file_id
+                logger.info(f"📋 Generated file_id for image: {file_id}")
+            
+            content = file_info.get('content')
+            if not content:
+                logger.error(f"❌ No content provided for image: {filename}")
+                return {
+                    'file_id': file_id,
+                    'filename': filename,
+                    'status': 'failed',
+                    'error': 'No image content provided',
+                    'analysis_summary': {'confidence': 0.0}
+                }
+            
+            content_type = file_info.get('content_type', 'image/png')
             
             logger.info(f"🖼️  Processing image file: {filename}")
             logger.info(f"   File ID: {file_id}")
@@ -604,6 +621,7 @@ class UnifiedConstructionAgent:
             logger.info(f"   Size: {len(content) / 1024:.1f} KB")
             
             # Initialize image analyzer
+            from src.services.image_analyzer import ImageAnalyzerService
             analyzer = ImageAnalyzerService()
             
             # Analyze floor plan image
@@ -613,25 +631,30 @@ class UnifiedConstructionAgent:
                 min_confidence=0.5
             )
             
-            # Convert to dictionary for storage
+            # ✅ FIX: Convert to dictionary AND flatten for Firestore
+            # The to_dict() method should handle the initial conversion
             image_analysis_dict = analyzer.to_dict(analysis_result)
             
-            # Create analysis summary
+            # ✅ CRITICAL: Flatten the entire image_analysis_dict to ensure NO nested objects
+            # This converts any remaining dataclass objects, enums, etc. to primitives
+            flattened_image_analysis = self._flatten_for_firestore(image_analysis_dict)
+            
+            # Create analysis summary (also flatten to be safe)
             analysis_summary = {
                 'type': 'image',
                 'room_labels_found': len(analysis_result.room_labels),
                 'total_text_annotations': len(analysis_result.all_text_annotations),
                 'objects_detected': len(analysis_result.detected_objects),
-                'confidence': analysis_result.confidence,
-                'quality_score': analysis_result.quality_score,
-                'warnings': analysis_result.warnings,
+                'confidence': float(analysis_result.confidence),  # Ensure it's a Python float
+                'quality_score': float(analysis_result.quality_score),
+                'warnings': list(analysis_result.warnings),  # Ensure it's a list
                 'image_dimensions': {
-                    'width': analysis_result.image_dimensions.width,
-                    'height': analysis_result.image_dimensions.height,
-                    'aspect_ratio': analysis_result.image_dimensions.aspect_ratio
+                    'width': int(analysis_result.image_dimensions.width),
+                    'height': int(analysis_result.image_dimensions.height),
+                    'aspect_ratio': float(analysis_result.image_dimensions.aspect_ratio)
                 },
-                'processing_time_ms': analysis_result.processing_time_ms,
-                'cost_estimate': analysis_result.cost_estimate
+                'processing_time_ms': float(analysis_result.processing_time_ms),
+                'cost_estimate': float(analysis_result.cost_estimate)
             }
             
             logger.info(f"✅ Image analysis complete:")
@@ -644,35 +667,41 @@ class UnifiedConstructionAgent:
                 for warning in analysis_result.warnings:
                     logger.warning(f"   ⚠️ {warning}")
             
-            return {
+            # ✅ Return fully flattened data structure
+            result = {
                 'file_id': file_id,
                 'filename': filename,
                 'file_type': 'image',
                 'content_type': content_type,
                 'size': len(content),
                 'status': 'processed',
-                'image_analysis': image_analysis_dict,
-                'analysis_summary': analysis_summary,
-                'analysis_data': {
-                    'type': 'image',
-                    'analysis_summary': analysis_summary,
-                    'full_analysis': image_analysis_dict
-                }
+                'image_analysis': flattened_image_analysis,  # ✅ Flattened
+                'analysis_summary': analysis_summary,  # ✅ Already primitive types
+                'uploaded_at': file_info.get('uploaded_at'),
+                'processed_at': datetime.now(timezone.utc).isoformat()
             }
             
+            # ✅ EXTRA SAFETY: Flatten the entire result one more time
+            # This ensures absolutely nothing nested remains
+            return self._flatten_for_firestore(result)
+            
+        except KeyError as e:
+            logger.error(f"❌ Missing required field in file_info for {filename}: {e}", exc_info=True)
+            return {
+                'file_id': file_info.get('file_id', 'unknown'),
+                'filename': filename,
+                'status': 'failed',
+                'error': f'Missing required field: {str(e)}',
+                'analysis_summary': {'confidence': 0.0}
+            }
         except Exception as e:
             logger.error(f"❌ Image processing failed for {filename}: {e}", exc_info=True)
             return {
                 'file_id': file_info.get('file_id', 'unknown'),
-                'filename': file_info.get('filename', 'unknown'),
-                'file_type': 'image',
+                'filename': filename,
                 'status': 'failed',
                 'error': str(e),
-                'analysis_summary': {
-                    'type': 'image',
-                    'error': str(e),
-                    'confidence': 0.0
-                }
+                'analysis_summary': {'confidence': 0.0}
             }
 
     async def generate_offer(self, session_id: str) -> Dict[str, Any]:
@@ -1449,10 +1478,30 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
             file_context_parts.append(f"   - Tip: {file_type}")
             file_context_parts.append(f"   - Dimensiune: {file_size / 1024:.1f} KB")
             
-            # ✅ CRITICAL: Show COMPLETE data for DXF files
+            # ✅ CRITICAL: Show COMPLETE data for DXF files (full spec_analysis + summary)
             if analysis_summary.get("type") == "dxf":
                 file_context_parts.append(f"   - Format: Plan tehnic DXF")
+
+                # ✅ DEBUG: Log data structure to understand what exists
+                logger.info("🔍 DXF Data Structure Check:")
+                logger.info(f"   - analysis_summary keys: {list(analysis_summary.keys())}")
                 
+                full_analysis_data = file_ref.get("analysis_data", {})
+                logger.info(f"   - analysis_data keys: {list(full_analysis_data.keys())}")
+                
+                dxf_analysis = full_analysis_data.get("dxf_analysis", {})
+                logger.info(f"   - dxf_analysis keys: {list(dxf_analysis.keys())}")
+                
+                spec_analysis = dxf_analysis.get("spec_analysis", {}) if isinstance(dxf_analysis, dict) else {}
+                if spec_analysis:
+                    logger.info(f"   - spec_analysis keys: {list(spec_analysis.keys())}")
+                    logger.info(f"   - hvac_inventory count: {len(spec_analysis.get('hvac_inventory', []))}")
+                    logger.info(f"   - electrical_inventory count: {len(spec_analysis.get('electrical_inventory', []))}")
+                    logger.info(f"   - door_window_schedule count: {len(spec_analysis.get('door_window_schedule', []))}")
+
+                # ========================================================
+                # SECTION 1: BASIC INFO (from analysis_summary)
+                # ========================================================
                 total_area = analysis_summary.get("total_area", 0)
                 if total_area > 0:
                     file_context_parts.append(f"   - **Suprafață totală: {total_area:.2f} mp**")
@@ -1461,25 +1510,34 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                 if total_rooms > 0:
                     file_context_parts.append(f"   - **Număr spații: {total_rooms}**")
                 
-                # ✅ REMOVED SLICING: Show ALL rooms
+                # ========================================================
+                # SECTION 2: ROOMS WITH DIMENSIONS (COMPLETE)
+                # ========================================================
                 room_breakdown = analysis_summary.get("room_breakdown", [])
                 if room_breakdown:
                     file_context_parts.append(f"   - **Detalii spații (TOATE {len(room_breakdown)} spații):**")
-                    for room in room_breakdown:  # NO [:5] limit
+                    for room in room_breakdown:
                         room_name = room.get("room_name", "Unknown")
+                        romanian_name = room.get("romanian_name", room_name)
                         room_area = room.get("area", 0)
                         room_dims = room.get("dimensions", {})
                         
-                        room_detail = f"     • {room_name}: {room_area:.1f} mp"
+                        # Show Romanian name (more natural for Romanian users)
+                        room_detail = f"     • {romanian_name}: {room_area:.1f} mp"
+                        
+                        # Add dimensions if available
                         if room_dims.get("length") and room_dims.get("width"):
                             room_detail += f" ({room_dims['length']:.1f}m × {room_dims['width']:.1f}m)"
+                        
                         file_context_parts.append(room_detail)
                 
-                # ✅ REMOVED SLICING: Show ALL wall types
+                # ========================================================
+                # SECTION 3: WALL TYPES (COMPLETE)
+                # ========================================================
                 wall_types = analysis_summary.get("wall_types", [])
                 if wall_types:
                     file_context_parts.append(f"   - **Tipuri pereți (TOATE {len(wall_types)} tipuri):**")
-                    for wall in wall_types:  # NO [:3] limit
+                    for wall in wall_types:
                         if isinstance(wall, dict):
                             wall_desc = f"     • {wall.get('type_code', 'Unknown')}"
                             if wall.get('thickness_mm'):
@@ -1489,69 +1547,110 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                             file_context_parts.append(wall_desc)
                         else:
                             file_context_parts.append(f"     • {wall}")
-                
-                # ✅ NEW: Show HVAC inventory
-                hvac_inventory = analysis_summary.get("hvac_inventory", [])
+
+                # ========================================================
+                # SECTION 4: FINISHES (from spec_analysis)
+                # ========================================================
+                finishes_count = spec_analysis.get("finishes_count", 0)
+                if finishes_count > 0:
+                    file_context_parts.append(f"   - **Finisaje identificate: {finishes_count} finisaje**")
+                    
+                    # Load finishes from specification_analysis
+                    specification_data = spec_analysis.get("specification_analysis", {})
+                    if specification_data:
+                        finishes = specification_data.get("finishing_requirements", [])
+                        if finishes:
+                            file_context_parts.append(f"   - **Lista completă finisaje:**")
+                            for finish in finishes:
+                                finish_type = finish.get("finish_type", "Unknown")
+                                finish_spec = finish.get("specification", "")
+                                file_context_parts.append(f"     • {finish_type}: {finish_spec}")
+
+                # ========================================================
+                # SECTION 5: HVAC INVENTORY (COMPLETE)
+                # ========================================================
+                hvac_inventory = spec_analysis.get("hvac_inventory", [])
                 if hvac_inventory:
                     file_context_parts.append(f"   - **Inventar HVAC (TOATE {len(hvac_inventory)} unități):**")
                     for hvac in hvac_inventory:
-                        hvac_desc = f"     • {hvac.get('type', 'Unknown')}"
+                        hvac_type = hvac.get('type', 'Unknown')
+                        hvac_desc = f"     • {hvac_type}"
+                        
                         if hvac.get('model'):
                             hvac_desc += f" - {hvac['model']}"
                         if hvac.get('capacity_kw'):
                             hvac_desc += f" ({hvac['capacity_kw']}kW)"
                         if hvac.get('room'):
                             hvac_desc += f" [Cameră: {hvac['room']}]"
+                        
                         file_context_parts.append(hvac_desc)
+                elif analysis_summary.get("has_hvac"):
+                    file_context_parts.append(f"   - **Sistem HVAC:** Detectat (fără inventory detaliat)")
 
-                # ✅ NEW: Show Electrical inventory
-                electrical_inventory = analysis_summary.get("electrical_inventory", [])
+                # ========================================================
+                # SECTION 6: ELECTRICAL INVENTORY (COMPLETE)
+                # ========================================================
+                electrical_inventory = spec_analysis.get("electrical_inventory", [])
                 if electrical_inventory:
                     file_context_parts.append(f"   - **Inventar Instalații Electrice (TOATE {len(electrical_inventory)} componente):**")
                     
-                    # Group by type for better readability - USE .get() FOR SAFE ACCESS
-                    outlets = [e for e in electrical_inventory if e.get('type') == 'outlet']
-                    switches = [e for e in electrical_inventory if e.get('type') == 'switch']
-                    lights = [e for e in electrical_inventory if e.get('type') == 'light_fixture']
+                    # Group by component_type for better readability
+                    outlets = [e for e in electrical_inventory if e.get('component_type') == 'outlet']
+                    switches = [e for e in electrical_inventory if e.get('component_type') == 'switch']
+                    lights = [e for e in electrical_inventory if e.get('component_type') == 'light_fixture']
                     
+                    # OUTLETS
                     if outlets:
                         total_outlets = sum(e.get('quantity', 1) for e in outlets)
-                        file_context_parts.append(f"     • Prize: {total_outlets} bucăți")
-                        for outlet in outlets[:5]:  # Show first 5 with details
+                        file_context_parts.append(f"     • Prize: {total_outlets} bucăți total")
+                        # Show first 10 with details
+                        for outlet in outlets[:10]:
                             outlet_desc = f"       - {outlet.get('quantity', 1)}x"
                             if outlet.get('power_rating'):
                                 outlet_desc += f" {outlet['power_rating']}"
-                            if outlet.get('room'):
-                                outlet_desc += f" în {outlet['room']}"
+                            if outlet.get('room_association'):
+                                outlet_desc += f" în {outlet['room_association']}"
                             file_context_parts.append(outlet_desc)
+                        if len(outlets) > 10:
+                            file_context_parts.append(f"       ... și {len(outlets) - 10} prize suplimentare")
                     
+                    # SWITCHES
                     if switches:
                         total_switches = sum(e.get('quantity', 1) for e in switches)
-                        file_context_parts.append(f"     • Întrerupătoare: {total_switches} bucăți")
-                        for switch in switches[:5]:
+                        file_context_parts.append(f"     • Întrerupătoare: {total_switches} bucăți total")
+                        for switch in switches[:10]:
                             switch_desc = f"       - {switch.get('quantity', 1)}x"
-                            if switch.get('room'):
-                                switch_desc += f" în {switch['room']}"
+                            if switch.get('room_association'):
+                                switch_desc += f" în {switch['room_association']}"
                             file_context_parts.append(switch_desc)
+                        if len(switches) > 10:
+                            file_context_parts.append(f"       ... și {len(switches) - 10} întrerupătoare suplimentare")
                     
+                    # LIGHTS
                     if lights:
                         total_lights = sum(e.get('quantity', 1) for e in lights)
-                        file_context_parts.append(f"     • Corpuri iluminat: {total_lights} bucăți")
-                        for light in lights[:5]:
+                        file_context_parts.append(f"     • Corpuri iluminat: {total_lights} bucăți total")
+                        for light in lights[:10]:
                             light_desc = f"       - {light.get('quantity', 1)}x"
-                            if light.get('room'):
-                                light_desc += f" în {light['room']}"
+                            if light.get('room_association'):
+                                light_desc += f" în {light['room_association']}"
                             file_context_parts.append(light_desc)
+                        if len(lights) > 10:
+                            file_context_parts.append(f"       ... și {len(lights) - 10} corpuri suplimentare")
+                elif analysis_summary.get("has_electrical"):
+                    file_context_parts.append(f"   - **Instalații electrice:** Detectate (fără inventory detaliat)")
 
-                # ✅ NEW: Show Doors and Windows - SAFE ACCESS
-                door_window_schedule = analysis_summary.get("door_window_schedule", [])
+                # ========================================================
+                # SECTION 7: DOORS & WINDOWS SCHEDULE
+                # ========================================================
+                door_window_schedule = spec_analysis.get("door_window_schedule", [])
                 if door_window_schedule:
                     doors = [dw for dw in door_window_schedule if dw.get('type') == 'door']
                     windows = [dw for dw in door_window_schedule if dw.get('type') == 'window']
                     
                     if doors:
                         file_context_parts.append(f"   - **Uși (TOATE {len(doors)} bucăți):**")
-                        for door in doors:
+                        for door in doors[:15]:
                             width = door.get('width', 0)
                             height = door.get('height', 0)
                             if width > 0 and height > 0:
@@ -1560,65 +1659,18 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                                     door_desc += f" - {door['material']}"
                                 if door.get('opening_type'):
                                     door_desc += f" ({door['opening_type']})"
-                                if door.get('room'):
-                                    door_desc += f" [Cameră: {door['room']}]"
                                 file_context_parts.append(door_desc)
+                        if len(doors) > 15:
+                            file_context_parts.append(f"     ... și {len(doors) - 15} uși suplimentare")
                     
                     if windows:
-                        file_context_parts.append(f"   - **Feronere (TOATE {len(windows)} bucăți):**")
-                        for window in windows:
-                            width = window.get('width', 0)
-                            height = window.get('height', 0)
-                            if width > 0 and height > 0:
-                                window_desc = f"     • {width:.2f}m × {height:.2f}m"
-                                if window.get('material'):
-                                    window_desc += f" - {window['material']}"
-                                if window.get('room'):
-                                    window_desc += f" [Cameră: {window['room']}]"
-                                file_context_parts.append(window_desc)
+                        file_context_parts.append(f"   - **Ferestre: {len(windows)} bucăți**")
 
-                # ✅ NEW: Show Plumbing
-                plumbing_inventory = analysis_summary.get("plumbing_inventory", [])
-                if plumbing_inventory:
-                    file_context_parts.append(f"   - **Instalații Sanitare (TOATE {len(plumbing_inventory)} componente):**")
-                    for plumb in plumbing_inventory:
-                        plumb_desc = f"     • {plumb.get('fixture_type', plumb.get('type', 'Unknown'))}"
-                        if plumb.get('room'):
-                            plumb_desc += f" în {plumb['room']}"
-                        file_context_parts.append(plumb_desc)
-
-                # ✅ NEW: Show Flooring
-                flooring_schedule = analysis_summary.get("flooring_schedule", [])
-                if flooring_schedule:
-                    file_context_parts.append(f"   - **Pardoseli (TOATE {len(flooring_schedule)} specificații):**")
-                    for floor in flooring_schedule:
-                        floor_desc = f"     • {floor.get('type', 'Unknown')}"
-                        if floor.get('area') and floor['area'] > 0:
-                            floor_desc += f" - {floor['area']:.1f} mp"
-                        if floor.get('material'):
-                            floor_desc += f" ({floor['material']})"
-                        if floor.get('room'):
-                            floor_desc += f" [Cameră: {floor['room']}]"
-                        file_context_parts.append(floor_desc)
-
-                # ✅ NEW: Show Ceiling
-                ceiling_schedule = analysis_summary.get("ceiling_schedule", [])
-                if ceiling_schedule:
-                    file_context_parts.append(f"   - **Tavane (TOATE {len(ceiling_schedule)} specificații):**")
-                    for ceil in ceiling_schedule:
-                        ceil_desc = f"     • "
-                        if ceil.get('type'):
-                            ceil_desc += f"{ceil.get('type', 'Unknown')}"
-                        if ceil.get('height'):
-                            ceil_desc += f" - înălțime {ceil['height']:.2f}m"
-                        if ceil.get('room'):
-                            ceil_desc += f" [Cameră: {ceil['room']}]"
-                        file_context_parts.append(ceil_desc)
-
-                # ✅ NEW: Show Dimensions
-                dimension_schedule = analysis_summary.get("dimension_schedule", [])
-                if dimension_schedule and len(dimension_schedule) > 0:
-                    file_context_parts.append(f"   - **Dimensiuni cotate:** {len(dimension_schedule)} măsurători exacte disponibile")
+                # ========================================================
+                # SECTION 8: DIMENSIONS FLAG
+                # ========================================================
+                if analysis_summary.get("has_dimensions"):
+                    file_context_parts.append(f"   - **Dimensiuni:** Plan cotat complet")
                 
                 # ✅ NEW: Show ALL materials
                 spec_analysis = analysis_summary.get("specification_analysis", {})

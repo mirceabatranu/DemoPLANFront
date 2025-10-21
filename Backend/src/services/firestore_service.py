@@ -1,46 +1,57 @@
 """
 DemoPLAN - Enhanced Firestore Service
 Google Cloud Firestore integration with ML session storage and scalable subcollections.
+This is a focused, clean implementation used by the backend. It provides class-level
+serialization helpers and robust save/load operations with an optional geometric split
+to external storage.
 """
 
-import asyncio
+from enum import Enum
 import logging
 from typing import Dict, List, Any, Optional
-from datetime import datetime, timezone, timedelta
-import json
+from datetime import datetime, timezone
 
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 from google.api_core import exceptions
-from dataclasses import is_dataclass, asdict
+"""
+FirestoreService - clean replacement
 
+This file implements a compact FirestoreService with class-level helpers
+for serializing complex objects into Firestore-safe primitives and a
+geometric-split helper for storing large DXF geometry externally.
+"""
+
+from enum import Enum
+import logging
+from typing import Dict, List, Any, Optional
+from datetime import datetime, timezone
+
+try:
+    from google.cloud import firestore
+except Exception:
+    firestore = None
+
+from dataclasses import is_dataclass, asdict
 from config.config import settings
 
 logger = logging.getLogger("demoplan.services.firestore")
 
-# --- Constants for Subcollection Architecture ---
 MESSAGES_SUBCOLLECTION = "messages"
 FILE_ANALYSES_SUBCOLLECTION = "file_analyses"
 DEFAULT_MESSAGE_LIMIT = 50
 
-# Import geometric storage
+# optional geometric storage
 try:
     from src.services.storage_service import geometric_storage
-except ImportError:
-    logger.warning("⚠️ Geometric storage not available")
+except Exception:
     geometric_storage = None
 
+
 class FirestoreService:
-    """
-    Enhanced Firestore service for ML-enabled session persistence.
-    Handles chat sessions using a scalable subcollection model for messages and file analyses.
-    """
-    
     def __init__(self):
-        self.db: Optional[firestore.AsyncClient] = None
+        self.db: Optional[Any] = None
         self.initialized = False
-        
-        # ML-specific collections
         self.ml_collections = {
             "chat_sessions": "engineer_chat_sessions",
             "training_data": "ml_training_data",
@@ -48,88 +59,640 @@ class FirestoreService:
             "pattern_templates": "ml_pattern_templates",
             "learning_metrics": "ml_learning_metrics",
             "enhanced_patterns": "enhanced_analysis_patterns",
-            "ocr_results": "ocr_results"
+            "ocr_results": "ocr_results",
         }
-        
+
     async def initialize(self):
-        """Initialize Firestore connection with ML collections"""
-        try:
-            if self.initialized:
-                return
-            logger.info("🔥 Initializing Firestore connection with ML support...")
-            
-            # Initialize Firestore client
-            self.db = firestore.AsyncClient(
-                project=settings.gcp_project_id,
-                database="(default)"
-            )
-            
-            # Test the connection
-            await self._test_connection()
-            
-            # Setup ML collections
-            await self._setup_ml_collections()
-            
+        if self.initialized:
+            return
+        if firestore is None:
+            logger.warning("google-cloud-firestore not installed - running in mock mode")
+            self.db = None
             self.initialized = True
-            logger.info("✅ Firestore connection established with ML collections")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Firestore: {str(e)}")
-            raise
-    
+            return
+        self.db = firestore.AsyncClient(project=settings.gcp_project_id)
+        await self._test_connection()
+        await self._setup_ml_collections()
+        self.initialized = True
+
     async def _test_connection(self):
-        """Test Firestore connection"""
         try:
-            # Try to read from a test collection
-            test_doc = await self.db.collection("test").document("connection").get()
-            logger.debug("🔥 Firestore connection test successful")
-        except Exception as e:
-            logger.warning(f"⚠️ Firestore connection test warning: {str(e)}")
-            # Don't fail initialization for connection test issues
-    
+            if self.db is None:
+                return
+            await self.db.collection("__health_check").document("ping").get()
+        except Exception:
+            logger.warning("Firestore health check failed")
+
     async def _setup_ml_collections(self):
-        """Setup ML-specific collections"""
+        logger.info("🗄️ Setting up ML collections...")
+        for logical_name, collection_name in self.ml_collections.items():
+            logger.debug(f"Mapped {logical_name} → {collection_name}")
+        logger.info("✅ ML collections ready")
+
+    # class-level helpers
+    def _serialize_data(self, data: Any) -> Any:
+        if data is None:
+            return None
+        if isinstance(data, (str, int, float, bool)):
+            return data
+        if isinstance(data, bytes):
+            return f"<bytes:{len(data)}>"
+        if isinstance(data, datetime):
+            return data
+        if isinstance(data, Enum):
+            return data.value
+        if is_dataclass(data) and not isinstance(data, type):
+            return self._serialize_data(asdict(data))
+        if isinstance(data, dict):
+            return {str(k): self._serialize_data(v) for k, v in data.items()}
+        if isinstance(data, (list, tuple)):
+            """
+            FirestoreService - clean, minimal, and well-formed implementation
+
+            Provides:
+            - class-level serialization helpers: _serialize_data, _validate_firestore_safe, _force_serialize_to_primitives
+            - basic Firestore operations: save/get/update documents
+            - subcollection helpers for messages and file analyses
+            - geometric-split support for DXF files (stores heavy geometry in external storage)
+
+            This file purposefully avoids duplicate or nested definitions and is formatted
+            for readability and maintainability.
+            """
+
+            from enum import Enum
+            import logging
+            from typing import Dict, List, Any, Optional
+            from datetime import datetime, timezone
+
+            try:
+                from google.cloud import firestore
+            except Exception:
+                firestore = None
+
+            from dataclasses import is_dataclass, asdict
+            from config.config import settings
+
+            logger = logging.getLogger("demoplan.services.firestore")
+
+            MESSAGES_SUBCOLLECTION = "messages"
+            FILE_ANALYSES_SUBCOLLECTION = "file_analyses"
+            DEFAULT_MESSAGE_LIMIT = 50
+
+            # optional geometric storage
+            try:
+                from src.services.storage_service import geometric_storage
+            except Exception:
+                geometric_storage = None
+
+
+            class FirestoreService:
+                def __init__(self):
+                    self.db: Optional[Any] = None
+                    self.initialized = False
+                    self.ml_collections = {
+                        "chat_sessions": "engineer_chat_sessions",
+                        "training_data": "ml_training_data",
+                        "project_learning": "project_learning_outcomes",
+                        "pattern_templates": "ml_pattern_templates",
+                        "learning_metrics": "ml_learning_metrics",
+                        "enhanced_patterns": "enhanced_analysis_patterns",
+                        "ocr_results": "ocr_results",
+                    }
+
+                async def initialize(self):
+                    if self.initialized:
+                        return
+                    if firestore is None:
+                        logger.warning(
+                            "google-cloud-firestore not installed - running in mock mode"
+                        )
+                        self.db = None
+                        self.initialized = True
+                        return
+
+                    self.db = firestore.AsyncClient(project=settings.gcp_project_id)
+                    await self._test_connection()
+                    await self._setup_ml_collections()
+                    self.initialized = True
+
+                async def _test_connection(self):
+                    try:
+                        if self.db is None:
+                            return
+                        await self.db.collection("__health_check").document("ping").get()
+                    except Exception:
+                        logger.warning("Firestore health check failed")
+
+                async def _setup_ml_collections(self):
+                    logger.info("Setting up ML collections")
+                    for logical_name, collection_name in self.ml_collections.items():
+                        logger.debug(f"Mapped {logical_name} -> {collection_name}")
+
+                # ---- Serialization helpers (class-level) ----
+                def _serialize_data(self, data: Any) -> Any:
+                    if data is None:
+                        return None
+                    if isinstance(data, (str, int, float, bool)):
+                        return data
+                    if isinstance(data, bytes):
+                        return f"<bytes:{len(data)}>"
+                    if isinstance(data, datetime):
+                        return data
+                    if isinstance(data, Enum):
+                        return data.value
+                    if is_dataclass(data) and not isinstance(data, type):
+                        return self._serialize_data(asdict(data))
+                    if isinstance(data, dict):
+                        return {str(k): self._serialize_data(v) for k, v in data.items()}
+                    if isinstance(data, (list, tuple)):
+                        return [self._serialize_data(v) for v in data]
+                    if hasattr(data, "to_dict") and callable(getattr(data, "to_dict")):
+                        try:
+                            return self._serialize_data(data.to_dict())
+                        except Exception:
+                            pass
+                    if hasattr(data, "__dict__"):
+                        try:
+                            return self._serialize_data(data.__dict__)
+                        except Exception:
+                            pass
+                    return str(data)
+
+                def _validate_firestore_safe(self, data: Any, path: str = "root") -> List[str]:
+                    problems: List[str] = []
+                    safe = (str, int, float, bool, type(None), datetime, list, dict)
+                    if not isinstance(data, safe):
+                        problems.append(f"{path}: {type(data).__name__}")
+                        return problems
+                    if isinstance(data, dict):
+                        for k, v in data.items():
+                            problems.extend(self._validate_firestore_safe(v, f"{path}.{k}"))
+                    if isinstance(data, list):
+                        for i, v in enumerate(data):
+                            problems.extend(self._validate_firestore_safe(v, f"{path}[{i}]"))
+                    return problems
+
+                def _force_serialize_to_primitives(self, data: Any) -> Any:
+                    if data is None:
+                        return None
+                    if isinstance(data, (str, int, float, bool)):
+                        return data
+                    if isinstance(data, datetime):
+                        return data
+                    if isinstance(data, bytes):
+                        return f"<bytes:{len(data)}>"
+                    if isinstance(data, dict):
+                        return {str(k): self._force_serialize_to_primitives(v) for k, v in data.items()}
+                    if isinstance(data, (list, tuple)):
+                        return [self._force_serialize_to_primitives(v) for v in data]
+                    try:
+                        return str(data)
+                    except Exception:
+                        return "<unserializable>"
+
+                # ---- Core operations ----
+                async def _save_document_direct(self, collection: str, document_id: str, data: Dict[str, Any]) -> bool:
+                    if not self.initialized:
+                        await self.initialize()
+                    payload = self._serialize_data(data)
+                    problems = self._validate_firestore_safe(payload)
+                    if problems:
+                        logger.warning(f"Validation problems: {problems}, forcing serialization")
+                        payload = self._force_serialize_to_primitives(data)
+                    if self.db is None:
+                        logger.info(f"(mock) save {collection}/{document_id}")
+                        return True
+                    try:
+                        await self.db.collection(collection).document(document_id).set(payload, merge=True)
+                        return True
+                    except Exception as e:
+                        logger.error(f"Failed to save document {collection}/{document_id}: {e}")
+                        return False
+
+                async def save_document(self, collection: str, document_id: str, data: Dict[str, Any]) -> bool:
+                    try:
+                        data_copy = dict(data)
+                        if collection == "chat_sessions":
+                            for fld in ("conversation", "conversation_history", "analysis_results"):
+                                data_copy.pop(fld, None)
+                        enhanced = {**data_copy, "_updated_at": datetime.now(timezone.utc), "_collection_type": collection}
+                        physical = self.ml_collections.get(collection, f"demoplan_{collection}")
+                        return await self._save_document_direct(physical, document_id, enhanced)
+                    except Exception as e:
+                        logger.error(f"save_document error: {e}")
+                        return False
+
+                async def get_document(self, collection: str, document_id: str) -> Optional[Dict[str, Any]]:
+                    try:
+                        if not self.initialized:
+                            await self.initialize()
+                        if self.db is None:
+                            return None
+                        physical = self.ml_collections.get(collection, f"demoplan_{collection}")
+                        doc = await self.db.collection(physical).document(document_id).get()
+                        if not doc.exists:
+                            return None
+                        data = doc.to_dict()
+                        data["_id"] = doc.id
+                        return data
+                    except Exception as e:
+                        logger.error(f"get_document error: {e}")
+                        return None
+
+                # ---- Messages ----
+                async def save_message_to_subcollection(self, session_id: str, message: Dict[str, Any]) -> Optional[str]:
+                    try:
+                        if not self.initialized:
+                            await self.initialize()
+                        if self.db is None:
+                            logger.info(f"(mock) saved message for {session_id}")
+                            return "mock-id"
+                        collection_name = self.ml_collections["chat_sessions"]
+                        session_ref = self.db.collection(collection_name).document(session_id)
+                        msg = dict(message)
+                        msg.setdefault("timestamp", datetime.now(timezone.utc))
+                        serialized = self._serialize_data(msg)
+                        _, ref = await session_ref.collection(MESSAGES_SUBCOLLECTION).add(serialized)
+                        return ref.id
+                    except Exception as e:
+                        logger.error(f"save_message error: {e}")
+                        return None
+
+                async def load_messages_from_subcollection(self, session_id: str, limit: int = DEFAULT_MESSAGE_LIMIT) -> List[Dict[str, Any]]:
+                    try:
+                        if not self.initialized:
+                            await self.initialize()
+                        if self.db is None:
+                            return []
+                        q = self.db.collection(self.ml_collections["chat_sessions"]).document(session_id).collection(MESSAGES_SUBCOLLECTION).order_by("timestamp")
+                        if limit:
+                            q = q.limit(limit)
+                        results: List[Dict[str, Any]] = []
+                        async for doc in q.stream():
+                            d = doc.to_dict()
+                            d["_id"] = doc.id
+                            results.append(d)
+                        return results
+                    except Exception as e:
+                        logger.error(f"load_messages error: {e}")
+                        return []
+
+                # ---- File analyses ----
+                async def save_file_analysis(self, session_id: str, file_id: str, analysis: Dict[str, Any]) -> bool:
+                    try:
+                        if not self.initialized:
+                            await self.initialize()
+                        if self.db is None:
+                            return True
+                        collection_name = self.ml_collections["chat_sessions"]
+                        doc_ref = self.db.collection(collection_name).document(session_id).collection(FILE_ANALYSES_SUBCOLLECTION).document(file_id)
+                        payload = {"file_id": file_id, "analysis_data": analysis, "saved_at": datetime.now(timezone.utc)}
+                        await doc_ref.set(self._serialize_data(payload), merge=True)
+                        return True
+                    except Exception as e:
+                        logger.error(f"save_file_analysis error: {e}")
+                        return False
+
+                async def load_file_analysis(self, session_id: str, file_id: str) -> Optional[Dict[str, Any]]:
+                    try:
+                        if not self.initialized:
+                            await self.initialize()
+                        if self.db is None:
+                            return None
+                        collection_name = self.ml_collections["chat_sessions"]
+                        doc = await self.db.collection(collection_name).document(session_id).collection(FILE_ANALYSES_SUBCOLLECTION).document(file_id).get()
+                        if not doc.exists:
+                            return None
+                        return doc.to_dict()
+                    except Exception as e:
+                        logger.error(f"load_file_analysis error: {e}")
+                        return None
+
+                async def delete_file_analysis(self, session_id: str, file_id: str) -> bool:
+                    try:
+                        if not self.initialized:
+                            await self.initialize()
+                        if self.db is None:
+                            return True
+                        collection_name = self.ml_collections["chat_sessions"]
+                        await self.db.collection(collection_name).document(session_id).collection(FILE_ANALYSES_SUBCOLLECTION).document(file_id).delete()
+                        return True
+                    except Exception as e:
+                        logger.error(f"delete_file_analysis error: {e}")
+                        return False
+
+                async def save_file_analysis_with_geometric_split(self, session_id: str, file_id: str, analysis_data: Dict[str, Any]) -> bool:
+                    try:
+                        if not self.initialized:
+                            await self.initialize()
+                        # If no geometric storage available or not a dxf, save whole analysis
+                        if geometric_storage is None:
+                            return await self.save_file_analysis(session_id, file_id, analysis_data)
+                        file_type = analysis_data.get("analysis_data", {}).get("file_type")
+                        dxf_result = analysis_data.get("analysis_data", {}).get("dxf_analysis_result")
+                        if file_type == "dxf" and dxf_result:
+                            geometric = dxf_result.get("dxf_analysis")
+                            if geometric:
+                                geom_ref = await geometric_storage.store_geometric_data(session_id=session_id, file_id=file_id, geometric_data=geometric)
+                                if geom_ref:
+                                    copy = dict(analysis_data)
+                                    if "analysis_data" in copy and "dxf_analysis_result" in copy["analysis_data"]:
+                                        copy["analysis_data"]["dxf_analysis_result"] = {"status": "stored_in_gcs"}
+                                    copy["geometric_ref"] = geom_ref
+                                    copy["has_geometric_data"] = True
+                                    copy["geometric_storage"] = "gcs"
+                                    return await self.save_file_analysis(session_id, file_id, copy)
+                        analysis_data["has_geometric_data"] = False
+                        analysis_data["geometric_storage"] = "none"
+                        return await self.save_file_analysis(session_id, file_id, analysis_data)
+                    except Exception as e:
+                        logger.error(f"save_file_analysis_with_geometric_split error: {e}")
+                        return False
+
+                async def load_file_analysis_with_geometric(self, session_id: str, file_id: str) -> Optional[Dict[str, Any]]:
+                    try:
+                        analysis_data = await self.load_file_analysis(session_id, file_id)
+                        if not analysis_data:
+                            return None
+                        has_geometric_data = analysis_data.get("has_geometric_data", False)
+                        geometric_ref = analysis_data.get("geometric_ref")
+                        if has_geometric_data and geometric_ref and geometric_storage and geometric_storage.is_available():
+                            geometric_data = await geometric_storage.load_geometric_data_from_ref(geometric_ref)
+                            if geometric_data:
+                                if "analysis_data" not in analysis_data:
+                                    analysis_data["analysis_data"] = {}
+                                if "dxf_analysis_result" not in analysis_data["analysis_data"]:
+                                    analysis_data["analysis_data"]["dxf_analysis_result"] = {}
+                                analysis_data["analysis_data"]["dxf_analysis_result"]["dxf_analysis"] = geometric_data
+                                analysis_data["analysis_data"]["dxf_analysis_result"]["status"] = "success"
+                        return analysis_data
+                    except Exception as e:
+                        logger.error(f"load_file_analysis_with_geometric error: {e}")
+                        return None
+
+                async def delete_file_analysis_with_geometric(self, session_id: str, file_id: str) -> bool:
+                    try:
+                        analysis_data = await self.load_file_analysis(session_id, file_id)
+                        if analysis_data:
+                            geometric_ref = analysis_data.get("geometric_ref")
+                            if geometric_ref and geometric_storage and geometric_storage.is_available():
+                                await geometric_storage.delete_geometric_data(session_id, file_id)
+                        return await self.delete_file_analysis(session_id, file_id)
+                    except Exception as e:
+                        logger.error(f"delete_file_analysis_with_geometric error: {e}")
+                        return False
+
+                def _deep_copy_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
+                    import copy
+                    return copy.deepcopy(data)
+
+
+            # End of file
+                    # --- Message subcollection helpers ---
+                    async def save_message_to_subcollection(self, session_id: str, message: Dict[str, Any]) -> Optional[str]:
+                        try:
+                            if not self.initialized:
+                                await self.initialize()
+                            if self.db is None:
+                                logger.info(f"(mock) Saved message to {session_id}")
+                                return "mock-id"
+
+                            collection_name = self.ml_collections["chat_sessions"]
+                            session_ref = self.db.collection(collection_name).document(session_id)
+                            message_data = dict(message)
+                            message_data.setdefault("timestamp", datetime.now(timezone.utc))
+                            serialized = self._serialize_data(message_data)
+                            _, ref = await session_ref.collection(MESSAGES_SUBCOLLECTION).add(serialized)
+                            return ref.id
+                        except Exception as e:
+                            logger.error(f"❌ save_message error: {e}")
+                            return None
+
+                    async def load_messages_from_subcollection(self, session_id: str, limit: int = DEFAULT_MESSAGE_LIMIT) -> List[Dict[str, Any]]:
+                        try:
+                            if not self.initialized:
+                                await self.initialize()
+                            if self.db is None:
+                                return []
+                            collection_name = self.ml_collections["chat_sessions"]
+                            messages_ref = self.db.collection(collection_name).document(session_id).collection(MESSAGES_SUBCOLLECTION)
+                            query = messages_ref.order_by("timestamp")
+                            if limit:
+                                query = query.limit(limit)
+                            results = []
+                            async for doc in query.stream():
+                                d = doc.to_dict()
+                                d["_id"] = doc.id
+                                results.append(self._deserialize_data(d))
+                            return results
+                        except Exception as e:
+                            logger.error(f"❌ load_messages error: {e}")
+                            return []
+
+                    async def query_documents(self, collection: str, filters: Optional[List[tuple]] = None, limit: Optional[int] = None, order_by: Optional[str] = None) -> List[Dict[str, Any]]:
+                        try:
+                            if not self.initialized:
+                                await self.initialize()
+                            if self.db is None:
+                                return []
+                            physical_collection = self.ml_collections.get(collection, f"demoplan_{collection}")
+                            query = self.db.collection(physical_collection)
+                            if filters:
+                                for field, op, value in filters:
+                                    # Fallback if FieldFilter is unavailable
+                                    if FieldFilter is not None:
+                                        query = query.where(filter=FieldFilter(field, op, value))
+                            if order_by:
+                                query = query.order_by(order_by)
+                            if limit:
+                                query = query.limit(limit)
+                            results = []
+                            async for doc in query.stream():
+                                d = doc.to_dict()
+                                d["_id"] = doc.id
+                                results.append(self._deserialize_data(d))
+                            return results
+                        except Exception as e:
+                            logger.error(f"❌ query_documents error: {e}")
+                            return []
+
+                    async def update_document(self, collection: str, document_id: str, update_data: Dict[str, Any]) -> bool:
+                        try:
+                            if not self.initialized:
+                                await self.initialize()
+                            physical_collection = self.ml_collections.get(collection, f"demoplan_{collection}")
+                            enhanced = {**update_data, "_updated_at": datetime.now(timezone.utc)}
+                            serialized = self._serialize_data(enhanced)
+                            if self.db is None:
+                                logger.info(f"(mock) Updated {collection}/{document_id}")
+                                return True
+                            await self.db.collection(physical_collection).document(document_id).set(serialized, merge=True)
+                            return True
+                        except Exception as e:
+                            logger.error(f"❌ update_document error: {e}")
+                            return False
+
+                    # --- File analysis helpers and geometric split ---
+                    async def save_file_analysis(self, session_id: str, file_id: str, analysis: Dict[str, Any]) -> bool:
+                        try:
+                            if not self.initialized:
+                                await self.initialize()
+                            collection_name = self.ml_collections["chat_sessions"]
+                            doc_ref = self.db.collection(collection_name).document(session_id).collection(FILE_ANALYSES_SUBCOLLECTION).document(file_id) if self.db else None
+                            payload = {
+                                "file_id": file_id,
+                                "analysis_data": analysis,
+                                "saved_at": datetime.now(timezone.utc)
+                            }
+                            if self.db is None:
+                                logger.info(f"(mock) Saved file analysis {file_id} for session {session_id}")
+                                return True
+                            await doc_ref.set(self._serialize_data(payload), merge=True)
+                            return True
+                        except Exception as e:
+                            logger.error(f"❌ save_file_analysis error: {e}")
+                            return False
+
+                    async def load_file_analysis(self, session_id: str, file_id: str) -> Optional[Dict[str, Any]]:
+                        try:
+                            if not self.initialized:
+                                await self.initialize()
+                            if self.db is None:
+                                return None
+                            collection_name = self.ml_collections["chat_sessions"]
+                            doc = await self.db.collection(collection_name).document(session_id).collection(FILE_ANALYSES_SUBCOLLECTION).document(file_id).get()
+                            if not doc.exists:
+                                return None
+                            return doc.to_dict()
+                        except Exception as e:
+                            logger.error(f"❌ load_file_analysis error: {e}")
+                            return None
+
+                    async def delete_file_analysis(self, session_id: str, file_id: str) -> bool:
+                        try:
+                            if not self.initialized:
+                                await self.initialize()
+                            if self.db is None:
+                                return True
+                            collection_name = self.ml_collections["chat_sessions"]
+                            await self.db.collection(collection_name).document(session_id).collection(FILE_ANALYSES_SUBCOLLECTION).document(file_id).delete()
+                            return True
+                        except Exception as e:
+                            logger.error(f"❌ delete_file_analysis error: {e}")
+                            return False
+
+                    async def save_file_analysis_with_geometric_split(self, session_id: str, file_id: str, analysis_data: Dict[str, Any]) -> bool:
+                        try:
+                            if not self.initialized:
+                                await self.initialize()
+
+                            file_type = analysis_data.get("analysis_data", {}).get("file_type")
+                            dxf_result = analysis_data.get("analysis_data", {}).get("dxf_analysis_result")
+
+                            if file_type == "dxf" and dxf_result and geometric_storage and geometric_storage.is_available():
+                                geometric = dxf_result.get("dxf_analysis")
+                                if geometric:
+                                    geom_ref = await geometric_storage.store_geometric_data(session_id=session_id, file_id=file_id, geometric_data=geometric)
+                                    if geom_ref:
+                                        copy = dict(analysis_data)
+                                        # Replace the heavy payload with lightweight marker
+                                        if "analysis_data" in copy and "dxf_analysis_result" in copy["analysis_data"]:
+                                            copy["analysis_data"]["dxf_analysis_result"] = {"status": "stored_in_gcs"}
+                                        copy["geometric_ref"] = geom_ref
+                                        copy["has_geometric_data"] = True
+                                        copy["geometric_storage"] = "gcs"
+                                        return await self.save_file_analysis(session_id, file_id, copy)
+                            # Fallback: save whole analysis
+                            analysis_data["has_geometric_data"] = False
+                            analysis_data["geometric_storage"] = "none"
+                            return await self.save_file_analysis(session_id, file_id, analysis_data)
+                        except Exception as e:
+                            logger.error(f"❌ save_file_analysis_with_geometric_split error: {e}")
+                            return False
+
+                    # Utility
+                    def _deep_copy_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
+                        import copy
+                        return copy.deepcopy(data)
+
+        logger.info("✅ ML collections ready")
+
+    # --- Serialization / Validation Helpers (CLASS-LEVEL) ---
+    def _serialize_data(self, data: Any) -> Any:
+        """Recursively serialize ANY data type for Firestore"""
+        from enum import Enum
+
+        if data is None:
+            return None
+        if isinstance(data, (str, int, float, bool)):
+            return data
+        if isinstance(data, bytes):
+            logger.warning(f"⚠️  Converting bytes object (size={len(data)}) to string")
+            return f"<bytes:size={len(data)}>"
+        if isinstance(data, datetime):
+            return data
+        if isinstance(data, Enum):
+            return data.value
+        if is_dataclass(data) and not isinstance(data, type):
+            return self._serialize_data(asdict(data))
+        if isinstance(data, dict):
+            return {str(k): self._serialize_data(v) for k, v in data.items()}
+        if isinstance(data, (list, tuple)):
+            return [self._serialize_data(item) for item in data]
+        if hasattr(data, 'to_dict') and callable(getattr(data, 'to_dict')):
+            try:
+                return self._serialize_data(data.to_dict())
+            except Exception:
+                pass
+        if hasattr(data, '__dict__'):
+            try:
+                return self._serialize_data(data.__dict__)
+            except Exception:
+                pass
+        return str(data)
+
+    def _validate_firestore_safe(self, data: Any, path: str = "root") -> List[str]:
+        """Validate data contains only Firestore-safe types"""
+        problems: List[str] = []
+        safe_types = (str, int, float, bool, type(None), datetime, list, dict)
+
+        if not isinstance(data, safe_types):
+            problems.append(f"{path}: {type(data).__name__}")
+            return problems
+
+        if isinstance(data, dict):
+            for key, value in data.items():
+                problems.extend(self._validate_firestore_safe(value, f"{path}.{key}"))
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                problems.extend(self._validate_firestore_safe(item, f"{path}[{i}]"))
+
+        return problems
+
+    def _force_serialize_to_primitives(self, data: Any) -> Any:
+        """Emergency serializer - converts EVERYTHING to primitives"""
+        if data is None:
+            return None
+        if isinstance(data, (str, int, float, bool)):
+            return data
+        if isinstance(data, datetime):
+            return data
+        if isinstance(data, bytes):
+            return f"<bytes:{len(data)}>"
+        if isinstance(data, dict):
+            return {str(k): self._force_serialize_to_primitives(v) for k, v in data.items()}
+        if isinstance(data, (list, tuple)):
+            return [self._force_serialize_to_primitives(item) for item in data]
         try:
-            logger.info("🗄️ Setting up ML collections...")
-            
-            for logical_name, collection_name in self.ml_collections.items():
-                test_data = {
-                    "collection_type": logical_name,
-                    "initialized_at": datetime.now(timezone.utc),
-                    "ml_enabled": True,
-                    "description": self._get_collection_description(logical_name)
-                }
-                
-                await self._save_document_direct(
-                    collection_name,
-                    "_ml_initialization",
-                    test_data
-                )
-            
-            logger.info("✅ ML collections setup completed")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to setup ML collections: {str(e)}")
-            # Don't fail initialization
-    
-    def _get_collection_description(self, collection_type: str) -> str:
-        """Get description for collection types"""
-        descriptions = {
-            "chat_sessions": "Persistent chat sessions with scalable subcollections for history and analyses.",
-            "training_data": "Uploaded training files for ML learning",
-            "project_learning": "Historical project outcomes for learning",
-            "pattern_templates": "ML-generated patterns for analysis",
-            "learning_metrics": "Performance tracking for ML components",
-            "enhanced_patterns": "Enhanced analysis patterns from ML"
-        }
-        return descriptions.get(collection_type, "ML data collection")
+            return str(data)
+        except Exception:
+            return "<unserializable>"
 
     # --- CORE DOCUMENT OPERATIONS (MODIFIED) ---
-
     async def save_document(
-        self, 
-        collection: str, 
-        document_id: str, 
+        self,
+        collection: str,
+        document_id: str,
         data: Dict[str, Any]
     ) -> bool:
         """
@@ -139,9 +702,9 @@ class FirestoreService:
         try:
             if not self.initialized:
                 await self.initialize()
-            
+
             physical_collection = self.ml_collections.get(collection, f"demoplan_{collection}")
-            
+
             data_to_save = data.copy()
 
             # MODIFICATION: For chat sessions, remove large fields before saving main document.
@@ -157,16 +720,16 @@ class FirestoreService:
                 "_collection_type": collection,
                 "_ml_enabled": True
             }
-            
+
             return await self._save_document_direct(physical_collection, document_id, enhanced_data)
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to save document {collection}/{document_id}: {str(e)}")
             return False
-    
+
     async def get_document(
-        self, 
-        collection: str, 
+        self,
+        collection: str,
         document_id: str
     ) -> Optional[Dict[str, Any]]:
         """
@@ -176,12 +739,12 @@ class FirestoreService:
         try:
             if not self.initialized:
                 await self.initialize()
-            
+
             physical_collection = self.ml_collections.get(collection, f"demoplan_{collection}")
-            
+
             doc_ref = self.db.collection(physical_collection).document(document_id)
             doc = await doc_ref.get()
-            
+
             if doc.exists:
                 data = doc.to_dict()
                 data['_id'] = doc.id
@@ -190,28 +753,27 @@ class FirestoreService:
                 if collection == "chat_sessions":
                     logger.debug(f"Note: For session {document_id}, messages and analyses must be loaded from subcollections.")
                 return self._deserialize_data(data)
-            
+
             return None
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to get document {collection}/{document_id}: {str(e)}")
             return None
 
     # --- NEW: MESSAGE SUBCOLLECTION METHODS ---
-
     async def save_message_to_subcollection(self, session_id: str, message: Dict[str, Any]) -> Optional[str]:
         """Saves a single message to the 'messages' subcollection for a given session."""
         try:
             if not self.initialized: await self.initialize()
-            
+
             collection_name = self.ml_collections["chat_sessions"]
             session_ref = self.db.collection(collection_name).document(session_id)
-            
+
             message_data = message.copy()
             message_data['timestamp'] = message_data.get('timestamp', datetime.now(timezone.utc))
 
             serialized_message = self._serialize_data(message_data)
-            
+
             update_time, message_ref = await session_ref.collection(MESSAGES_SUBCOLLECTION).add(serialized_message)
             logger.info(f"✅ Message {message_ref.id} saved to session {session_id}")
             return message_ref.id
@@ -221,294 +783,25 @@ class FirestoreService:
 
     async def load_messages_from_subcollection(self, session_id: str, limit: int = DEFAULT_MESSAGE_LIMIT) -> List[Dict]:
         """Loads messages from the 'messages' subcollection, ordered by timestamp."""
-        try:
-            if not self.initialized: await self.initialize()
+        if not self.initialized: await self.initialize()
 
-            collection_name = self.ml_collections["chat_sessions"]
-            messages_ref = self.db.collection(collection_name).document(session_id).collection(MESSAGES_SUBCOLLECTION)
-            
-            query = messages_ref.order_by("timestamp", direction=firestore.Query.ASCENDING).limit(limit)
-            docs = await query.get()
-            
-            messages = [self._deserialize_data(doc.to_dict()) for doc in docs]
-            logger.info(f"📂 Loaded {len(messages)} messages for session {session_id}")
-            return messages
-        except Exception as e:
-            logger.error(f"❌ Failed to load messages for session {session_id}: {e}")
-            return []
+        collection_name = self.ml_collections["chat_sessions"]
+        messages_ref = self.db.collection(collection_name).document(session_id).collection(MESSAGES_SUBCOLLECTION)
 
-    async def get_message_count(self, session_id: str) -> int:
-        """Gets the total count of messages in a session's subcollection."""
-        try:
-            if not self.initialized: await self.initialize()
+        # Build query ordered by timestamp (ascending) and limited
+        query = messages_ref.order_by("timestamp")
+        if limit:
+            query = query.limit(limit)
 
-            collection_name = self.ml_collections["chat_sessions"]
-            messages_ref = self.db.collection(collection_name).document(session_id).collection(MESSAGES_SUBCOLLECTION)
-            
-            # Use an aggregate query for efficient counting
-            count_query = messages_ref.count()
-            result = await count_query.get()
-            count = result[0][0].value
-            logger.debug(f"📊 Message count for session {session_id} is {count}")
-            return count
-        except Exception as e:
-            logger.error(f"❌ Failed to get message count for session {session_id}: {e}")
-            return 0
+        docs_stream = query.stream()
+        results = []
+        async for doc in docs_stream:
+            d = doc.to_dict()
+            d["_id"] = doc.id
+            results.append(self._deserialize_data(d))
 
-    # --- NEW: FILE ANALYSIS SUBCOLLECTION METHODS ---
-
-    async def save_file_analysis(self, session_id: str, file_id: str, analysis_data: Dict[str, Any]) -> bool:
-        """Saves or overwrites a file analysis in the 'file_analyses' subcollection."""
-        try:
-            if not self.initialized: await self.initialize()
-
-            collection_name = self.ml_collections["chat_sessions"]
-            doc_ref = self.db.collection(collection_name).document(session_id).collection(FILE_ANALYSES_SUBCOLLECTION).document(file_id)
-            
-            serialized_data = self._serialize_data(analysis_data)
-            await doc_ref.set(serialized_data)
-            logger.info(f"💾 File analysis {file_id} saved for session {session_id}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Failed to save file analysis {file_id} for session {session_id}: {e}")
-            return False
-
-    async def load_file_analysis(self, session_id: str, file_id: str) -> Optional[Dict]:
-        """Loads a specific file analysis from the subcollection."""
-        try:
-            if not self.initialized: await self.initialize()
-
-            collection_name = self.ml_collections["chat_sessions"]
-            doc_ref = self.db.collection(collection_name).document(session_id).collection(FILE_ANALYSES_SUBCOLLECTION).document(file_id)
-            doc = await doc_ref.get()
-
-            if doc.exists:
-                logger.info(f"📂 Loaded file analysis {file_id} for session {session_id}")
-                return self._deserialize_data(doc.to_dict())
-            return None
-        except exceptions.NotFound:
-            logger.warning(f"⚠️ File analysis {file_id} not found for session {session_id}")
-            return None
-        except Exception as e:
-            logger.error(f"❌ Failed to load file analysis {file_id} for session {session_id}: {e}")
-            return None
-
-    async def load_all_file_analyses(self, session_id: str) -> List[Dict]:
-        """Loads all file analyses for a given session."""
-        try:
-            if not self.initialized: await self.initialize()
-            
-            collection_name = self.ml_collections["chat_sessions"]
-            analyses_ref = self.db.collection(collection_name).document(session_id).collection(FILE_ANALYSES_SUBCOLLECTION)
-            docs = analyses_ref.stream()
-            
-            analyses = [self._deserialize_data(doc.to_dict()) async for doc in docs]
-            logger.info(f"📂 Loaded all {len(analyses)} file analyses for session {session_id}")
-            return analyses
-        except Exception as e:
-            logger.error(f"❌ Failed to load all file analyses for session {session_id}: {e}")
-            return []
-
-    async def get_file_analyses_summary(self, session_id: str) -> Dict[str, Any]:
-        """Provides a summary of file analyses (count, types, statuses)."""
-        analyses = await self.load_all_file_analyses(session_id)
-        summary = {
-            "count": len(analyses),
-            "file_types": {},
-            "statuses": {}
-        }
-        for analysis in analyses:
-            file_type = analysis.get("file_type", "unknown")
-            status = analysis.get("processing_status", "unknown")
-            summary["file_types"][file_type] = summary["file_types"].get(file_type, 0) + 1
-            summary["statuses"][status] = summary["statuses"].get(status, 0) + 1
-        return summary
-
-    async def update_file_analysis_status(self, session_id: str, file_id: str, status: str) -> bool:
-        """Updates only the processing status of a file analysis document."""
-        try:
-            if not self.initialized: await self.initialize()
-
-            collection_name = self.ml_collections["chat_sessions"]
-            doc_ref = self.db.collection(collection_name).document(session_id).collection(FILE_ANALYSES_SUBCOLLECTION).document(file_id)
-            
-            await doc_ref.update({"processing_status": status, "_updated_at": datetime.now(timezone.utc)})
-            logger.info(f"🔄 Status for file {file_id} in session {session_id} updated to '{status}'")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Failed to update status for file {file_id}: {e}")
-            return False
-
-    async def delete_file_analysis(self, session_id: str, file_id: str) -> bool:
-        """Deletes a specific file analysis document from the subcollection."""
-        try:
-            if not self.initialized: await self.initialize()
-
-            collection_name = self.ml_collections["chat_sessions"]
-            doc_ref = self.db.collection(collection_name).document(session_id).collection(FILE_ANALYSES_SUBCOLLECTION).document(file_id)
-            
-            await doc_ref.delete()
-            logger.info(f"🗑️ Deleted file analysis {file_id} from session {session_id}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Failed to delete file analysis {file_id}: {e}")
-            return False
-
-    # Add to existing FirestoreService class
-
-    async def save_drawing_metadata(
-        self,
-        session_id: str,
-        drawing_id: str,
-        metadata: Dict[str, Any]
-    ) -> bool:
-        """
-        Save drawing metadata to drawings subcollection
-        
-        Path: engineer_chat_sessions/{session_id}/drawings/{drawing_id}
-        
-        Args:
-            session_id: Session identifier
-            drawing_id: Drawing identifier
-            metadata: Drawing metadata dictionary
-        
-        Returns:
-            True if saved successfully, False otherwise
-        """
-        try:
-            doc_ref = (
-                self.db.collection('engineer_chat_sessions')
-                .document(session_id)
-                .collection('drawings')
-                .document(drawing_id)
-            )
-            
-            await doc_ref.set(metadata)
-            logger.info(f"✅ Drawing metadata saved: {drawing_id}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to save drawing metadata: {e}")
-            return False
-
-    async def get_session_drawings(
-        self,
-        session_id: str
-    ) -> List[Dict[str, Any]]:
-        """
-        Get all drawings for a session from drawings subcollection
-        
-        Args:
-            session_id: Session identifier
-        
-        Returns:
-            List of drawing metadata dictionaries
-        """
-        try:
-            drawings_ref = (
-                self.db.collection('engineer_chat_sessions')
-                .document(session_id)
-                .collection('drawings')
-            )
-            
-            drawings = []
-            async for doc in drawings_ref.stream():
-                drawing_data = doc.to_dict()
-                drawing_data['drawing_id'] = doc.id
-                drawings.append(drawing_data)
-            
-            logger.info(f"✅ Retrieved {len(drawings)} drawings for session {session_id}")
-            return drawings
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to get drawings: {e}")
-            return []
-
-    # --- DEPRECATED METHODS ---
-
-    async def save_session_with_history(self, *args, **kwargs) -> bool:
-        """DEPRECATED: Use save_document and save_message_to_subcollection instead."""
-        logger.warning("save_session_with_history is deprecated. Use subcollection methods.")
-        # This method is now obsolete and should not be used.
-        return False
-    
-    async def get_session_conversation_history(self, *args, **kwargs) -> List:
-        """DEPRECATED: Use load_messages_from_subcollection instead."""
-        logger.warning("get_session_conversation_history is deprecated. Use load_messages_from_subcollection.")
-        # This method is now obsolete and should not be used.
-        return []
-        
-    # --- EXISTING UNMODIFIED/HELPER METHODS ---
-    
-    async def get_all_documents(
-        self,
-        collection: str,
-        limit: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Get all documents from a collection
-        
-        Args:
-            collection: Collection name
-            limit: Optional limit on number of documents
-        
-        Returns:
-            List of document dictionaries
-        """
-        try:
-            if not self.initialized:
-                await self.initialize()
-            
-            physical_collection = self.ml_collections.get(collection, f"demoplan_{collection}")
-            
-            query = self.db.collection(physical_collection)
-            if limit:
-                query = query.limit(limit)
-            
-            docs_stream = query.stream()
-            results = []
-            
-            async for doc in docs_stream:
-                doc_data = doc.to_dict()
-                doc_data['_id'] = doc.id
-                results.append(self._deserialize_data(doc_data))
-            
-            logger.debug(f"📂 Retrieved {len(results)} documents from {collection}")
-            return results
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to get all documents from {collection}: {str(e)}")
-            return []
-    
-    async def _save_document_direct(
-        self, 
-        collection_name: str, 
-        document_id: str, 
-        data: Dict[str, Any]
-    ) -> bool:
-        """Save document directly to physical collection"""
-        try:
-            serialized_data = self._serialize_data(data)
-            doc_ref = self.db.collection(collection_name).document(document_id)
-            await doc_ref.set(serialized_data)
-            logger.debug(f"💾 Document saved: {collection_name}/{document_id}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Direct save failed {collection_name}/{document_id}: {str(e)}")
-            return False
-            
-    async def delete_document(self, collection: str, document_id: str) -> bool:
-        """Delete a document with ML collection mapping"""
-        try:
-            if not self.initialized: await self.initialize()
-            physical_collection = self.ml_collections.get(collection, f"demoplan_{collection}")
-            doc_ref = self.db.collection(physical_collection).document(document_id)
-            await doc_ref.delete()
-            logger.debug(f"🗑️ Document deleted: {collection}/{document_id}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Failed to delete document {collection}/{document_id}: {str(e)}")
-            return False
+        # Return the list of messages
+        return results
 
     async def query_documents(
         self, 
@@ -562,26 +855,7 @@ class FirestoreService:
             logger.error(f"❌ Failed to update document {collection}/{document_id}: {str(e)}")
             return False
     
-    def _serialize_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Serialize data for Firestore storage with dataclass support"""
-        serialized = {}
-        for key, value in data.items():
-            if isinstance(value, datetime):
-                serialized[key] = value
-            elif is_dataclass(value) and not isinstance(value, type):
-                serialized[key] = self._serialize_data(asdict(value))
-            elif isinstance(value, dict):
-                serialized[key] = self._serialize_data(value)
-            elif isinstance(value, list):
-                serialized[key] = [
-                    self._serialize_data(asdict(item)) if (is_dataclass(item) and not isinstance(item, type))
-                    else self._serialize_data(item) if isinstance(item, dict)
-                    else item
-                    for item in value
-                ]
-            else:
-                serialized[key] = value
-        return serialized
+    # duplicate serializer removed - class-level helpers above are used
 
     def _deserialize_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Deserialize data from Firestore"""

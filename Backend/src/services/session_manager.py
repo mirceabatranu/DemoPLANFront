@@ -116,7 +116,7 @@ class SessionManager:
         try:
             # This assumes your FirestoreService has a method to get all documents from a collection.
             # This is a common pattern for such a service class.
-            all_sessions = await self.firestore.get_all_documents('engineer_chat_sessions')
+            all_sessions = await self.firestore.get_all_documents('chat_sessions')
         
             # The endpoint expects a list of dicts with session_id, created_at, and title.
             return [

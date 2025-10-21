@@ -29,9 +29,10 @@ SESSION_MANAGER_AVAILABLE = False
 FIRESTORE_AVAILABLE = False
 LLM_AVAILABLE = False
 
-from src.api.training_api import training_router
 from src.services.batch_processor import batch_processor
 from src.services.file_storage_service import file_storage_service
+from src.api.training_api import training_router
+app.include_router(training_router)
 
 # Import services first (they don't depend on agents)
 try:
@@ -238,7 +239,7 @@ async def global_exception_handler(request: Request, exc: Exception):
                 "details": str(exc)
             },
             "timestamp": datetime.now(timezone.utc).isoformat()
-        },
+        }
     )
 
 # =========================================================================
@@ -264,7 +265,7 @@ async def health_check():
             "drawing_agent": "available" if drawing_agent else "disabled"  # NEW
         },
         "workflow_status": workflow_status,
-        "drawing_generation": {  # NEW SECTION
+            "drawing_generation": {  # NEW SECTION
             "enabled": drawing_agent is not None,
             "supported_types": ["field_verification"],
             "max_retry_attempts": 3,
@@ -315,6 +316,7 @@ async def upload_files(
         }
         
         for file in files:
+            """Optional debugging endpoint: Direct access to geometric data from GCS."""
             try:
                 content = await file.read()
                 storage_info = await file_storage_service.store_session_file(
@@ -495,7 +497,10 @@ async def chat(
 @app.get("/session/{session_id}")
 async def get_session_status(session_id: str):
     """
-    Get session status. File and message counts are now retrieved from subcollections.
+    Get detailed session status including files and messages.
+    
+    This endpoint is called when loading a specific session.
+    Returns complete session info with file list and message preview.
     """
     try:
         manager = get_session_manager()
@@ -503,28 +508,77 @@ async def get_session_status(session_id: str):
         if not session:
             raise HTTPException(status_code=404, detail="Sesiune inexistentă")
         
-        # Query subcollections for counts, assuming firestore_service has these new methods.
-        message_count = 0
-        files_analyzed = []
+        # ✅ Load files from subcollection
+        files_list = []
+        file_count = 0
+        
         if firestore_service:
-            message_count = await firestore_service.get_message_count(session_id)
-            files_analyzed = await firestore_service.load_all_file_analyses(session_id)
-
+            try:
+                file_analyses = await firestore_service.load_all_file_analyses(session_id)
+                file_count = len(file_analyses) if file_analyses else 0
+                
+                # Format file list for frontend
+                if file_analyses:
+                    for file_analysis in file_analyses:
+                        files_list.append({
+                            "file_id": file_analysis.get("file_id"),
+                            "filename": file_analysis.get("filename"),
+                            "file_type": file_analysis.get("file_type"),
+                            "content_type": file_analysis.get("content_type"),
+                            "size": file_analysis.get("size", 0),
+                            "status": file_analysis.get("status", "unknown"),
+                            "uploaded_at": file_analysis.get("created_at", "").isoformat() 
+                                if isinstance(file_analysis.get("created_at"), datetime) 
+                                else str(file_analysis.get("created_at", ""))
+                        })
+            except Exception as e:
+                logger.error(f"Failed to load file analyses: {e}")
+        
+        # ✅ Get message count
+        message_count = 0
+        if firestore_service:
+            try:
+                message_count = await firestore_service.get_message_count(session_id)
+            except Exception as e:
+                logger.error(f"Failed to get message count: {e}")
+        
+        # Format response
+        created_at = session.created_at
+        if isinstance(created_at, datetime):
+            created_at_str = created_at.isoformat()
+        else:
+            created_at_str = str(created_at)
+        
+        last_activity = session.last_activity
+        if isinstance(last_activity, datetime):
+            last_activity_str = last_activity.isoformat()
+        else:
+            last_activity_str = created_at_str
+        
         return {
             "session_id": session.session_id,
-            "status": session.status,
-            "created_at": session.created_at.isoformat(),
-            "last_activity": session.last_activity.isoformat(),
-            "files_count": len(files_analyzed),
-            "conversation_length": message_count,
-            "confidence": session.confidence_score,
-            "can_generate_offer": session.can_generate_offer
+            "created_at": created_at_str,
+            "last_activity": last_activity_str,
+            "confidence_score": session.confidence_score,
+            "can_generate_offer": session.can_generate_offer,
+            "missing_data": session.missing_data,
+            
+            # ✅ NEW: File information
+            "file_count": file_count,
+            "files": files_list,
+            
+            # ✅ NEW: Message information  
+            "message_count": message_count,
+            
+            # Legacy fields for backward compatibility
+            "status": "active" if not session.is_expired else "expired"
         }
+        
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Session status error for {session_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Eroare la obținerea statusului sesiunii: {str(e)}")
+        logger.error(f"❌ Session status error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Eroare la preluarea statusului sesiunii.")
 
 @app.get("/session/{session_id}/files")
 async def get_session_files(session_id: str):
@@ -609,40 +663,39 @@ async def generate_drawing(
     specifications: Optional[str] = Form(None)
 ):
     """
-    Generate field verification drawing from session data
-    
+    Generate field verification drawing from session data.
+
     Phase 1 MVP: Only supports field_verification type
-    
+
     Args:
         session_id: Session with analyzed DXF data
         specifications: Optional custom specifications
-    
+
     Returns:
         Drawing generation result with download URL
     """
-    
     if not drawing_agent:
         raise HTTPException(
             status_code=503,
             detail="Serviciul de generare desene nu este disponibil momentan."
         )
-    
+
     try:
         # Verify session exists
         manager = get_session_manager()
         session = await manager.get_session(session_id)
-        
+
         if not session:
             raise HTTPException(status_code=404, detail="Sesiune inexistentă")
-        
+
         logger.info(f"🎨 Drawing generation requested for session {session_id}")
-        
+
         # Generate drawing
         result = await drawing_agent.generate_field_verification_drawing(
             session_id=session_id,
             custom_specifications=specifications
         )
-        
+
         if result.success:
             return {
                 "session_id": session_id,
@@ -665,7 +718,7 @@ async def generate_drawing(
                 "processing_time_ms": result.processing_time_ms,
                 "attempts": result.attempts
             }
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -675,18 +728,6 @@ async def generate_drawing(
             detail=f"Eroare la generarea desenului: {str(e)}"
         )
 
-@app.get("/session/{session_id}/drawings")
-async def list_session_drawings(session_id: str):
-    """
-    Get all generated drawings for a session
-    
-    Args:
-        session_id: Session identifier
-    
-    Returns:
-        List of drawings with metadata and URLs
-    """
-    
     if not firestore_service:
         raise HTTPException(status_code=503, detail="Firestore indisponibil")
     
