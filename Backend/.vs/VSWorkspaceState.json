@@ -1,0 +1,15 @@
+{
+  "ExpandedNodes": [
+    "\\config",
+    "\\src",
+    "\\src\\agents",
+    "\\src\\api",
+    "\\src\\intelligence",
+    "\\src\\models",
+    "\\src\\processors",
+    "\\src\\services",
+    "\\src\\templates",
+    "\\src\\utils"
+  ],
+  "PreviewInSolutionExplorer": false
+}

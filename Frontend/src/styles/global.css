@@ -14,7 +14,7 @@ body, html {
     font-family: 'Inter', sans-serif;
     
     /* --- FIX: Using relative paths for images --- */
-    background-image: url('./background.png');
+    background-image: url('/background.png');
     background-size: cover;
     background-position: center;
     background-repeat: no-repeat;
@@ -25,7 +25,7 @@ body, html {
 /* --- FIX: Using relative path for mobile image --- */
 @media (max-width: 768px) {
     body, html {
-        background-image: url('./backgroundmobile.png');
+        background-image: url('/backgroundmobile.png')
     }
 }
 
