@@ -32,7 +32,6 @@ LLM_AVAILABLE = False
 from src.services.batch_processor import batch_processor
 from src.services.file_storage_service import file_storage_service
 from src.api.training_api import training_router
-app.include_router(training_router)
 
 # Import services first (they don't depend on agents)
 try:

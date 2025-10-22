@@ -1,6 +1,7 @@
 """
 Offer Parser Service - Adaptive Multi-Format Parser
 Handles Imperial (hierarchical), Beautik (flat), and CCC (detailed) formats
+Now handles both CSV and single-sheet Excel for flat/hierarchical data.
 """
 
 import csv
@@ -9,6 +10,7 @@ from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 import openpyxl
 from openpyxl import load_workbook
+from openpyxl.worksheet.worksheet import Worksheet
 
 from src.models.offer_models import (
     ParsedOffer,
@@ -36,11 +38,37 @@ class OfferFormat:
     HIERARCHICAL_CSV = "hierarchical_csv"  # Imperial: A/B categories with items
     FLAT_CSV = "flat_csv"                  # Beautik: No categories, flat list
     DETAILED_EXCEL = "detailed_excel"      # CCC: Multi-sheet with unit prices
+    SINGLE_SHEET_EXCEL = "single_sheet_excel" # NEW: Adapter for flat/hierarchical Excel
 
 
 class FormatDetector:
     """Detects offer format from file content"""
     
+    @staticmethod
+    def _detect_csv_structure(file_content: bytes) -> str:
+        """Helper to check if CSV is flat or hierarchical"""
+        try:
+            content_str = file_content.decode('utf-8')
+        except UnicodeDecodeError:
+            content_str = file_content.decode('latin-1')
+        
+        reader = csv.reader(io.StringIO(content_str))
+        rows = list(reader)
+        
+        # Look for hierarchical markers (A, B, C categories)
+        has_categories = False
+        for row in rows[:30]:  # Check first 30 rows
+            if len(row) > 1:
+                cell_b = row[1].strip() if len(row) > 1 else ""
+                if cell_b in ['A', 'B', 'C']:
+                    has_categories = True
+                    break
+        
+        if has_categories:
+            return OfferFormat.HIERARCHICAL_CSV
+        else:
+            return OfferFormat.FLAT_CSV
+            
     @staticmethod
     def detect(file_content: bytes, filename: str) -> str:
         """
@@ -49,46 +77,40 @@ class FormatDetector:
         Returns:
             OfferFormat constant
         """
-        # Check file extension first
         filename_lower = filename.lower()
         is_excel = filename_lower.endswith(('.xlsx', '.xls'))
         is_csv = filename_lower.endswith('.csv')
         
         if is_excel:
-            # Try to detect if it's detailed (multi-sheet) or simple
             try:
+                # We use read_only=True for fast detection
                 wb = load_workbook(io.BytesIO(file_content), read_only=True)
+                # Check for detailed multi-sheet format first
                 if len(wb.sheetnames) > 2:
-                    # Multi-sheet workbook = detailed format
+                    # Multi-sheet workbook = detailed format (CCC)
                     return OfferFormat.DETAILED_EXCEL
-            except Exception:
-                pass
-        
-        if is_csv or not is_excel:
-            # Parse CSV to detect structure
-            try:
-                content_str = file_content.decode('utf-8')
-                reader = csv.reader(io.StringIO(content_str))
-                rows = list(reader)
-                
-                # Look for hierarchical markers (A, B, C categories)
-                has_categories = False
-                for row in rows[:30]:  # Check first 30 rows
-                    if len(row) > 1:
-                        cell_b = row[1].strip() if len(row) > 1 else ""
-                        if cell_b in ['A', 'B', 'C']:
-                            has_categories = True
-                            break
-                
-                if has_categories:
-                    return OfferFormat.HIERARCHICAL_CSV
                 else:
-                    return OfferFormat.FLAT_CSV
+                    # Simple single-sheet Excel (Sinsay, or Imperial-in-Excel)
+                    # Let the new adapter parser handle it
+                    return OfferFormat.SINGLE_SHEET_EXCEL
             except Exception:
-                pass
+                # Corrupt Excel file, let adapter parser handle failure
+                return OfferFormat.SINGLE_SHEET_EXCEL
         
-        # Default fallback
-        return OfferFormat.HIERARCHICAL_CSV
+        if is_csv:
+            try:
+                # It's a CSV, check if it's flat or hierarchical
+                return FormatDetector._detect_csv_structure(file_content)
+            except Exception:
+                # Fallback for unparseable CSV
+                return OfferFormat.FLAT_CSV
+        
+        # Fallback for unknown extensions (e.g., .txt)
+        try:
+            return FormatDetector._detect_csv_structure(file_content)
+        except Exception:
+            # Not CSV-like text, default to flat
+            return OfferFormat.FLAT_CSV
 
 
 # ============================================================================
@@ -120,7 +142,12 @@ class HierarchicalParser(BaseParser):
     def parse(self, file_content: bytes, filename: str) -> ParsedOffer:
         """Parse hierarchical CSV format"""
         # Decode CSV
-        content_str = file_content.decode('utf-8')
+        try:
+            content_str = file_content.decode('utf-8')
+        except UnicodeDecodeError:
+            content_str = file_content.decode('latin-1')
+            self.add_warning("File was not valid UTF-8, used latin-1 fallback.")
+            
         reader = csv.reader(io.StringIO(content_str))
         rows = list(reader)
         
@@ -216,7 +243,7 @@ class HierarchicalParser(BaseParser):
         
         for i in range(start_row, len(rows)):
             row = rows[i]
-            if len(row) < 3:
+            if len(row) < 4: # Need at least 4 columns (B, C, D)
                 continue
             
             cell_b = row[1].strip() if len(row) > 1 else ""
@@ -297,24 +324,82 @@ class HierarchicalParser(BaseParser):
 
 
 # ============================================================================
-# FLAT CSV PARSER (Beautik)
+# FLAT CSV PARSER (Beautik / Sinsay)
+# ============================================================================
+
+# ============================================================================
+# FLAT CSV PARSER (Beautik / Sinsay)
+# ============================================================================
+
+# ============================================================================
+# FLAT CSV PARSER (Beautik / Sinsay)
 # ============================================================================
 
 class FlatParser(BaseParser):
-    """Parses Beautik/SL3 format: Flat list with no categories"""
+    """
+    Parses flat list formats (Beautik/SL3, Sinsay).
+    Auto-detects column positions based on headers.
+    Can parse summary totals or full unit prices.
+    """
     
+    def __init__(self):
+        super().__init__()
+        # Column indices to find
+        self.col_idx_item_num = -1
+        self.col_idx_desc = -1
+        self.col_idx_value = -1
+        # New columns for unit pricing
+        self.col_idx_unit = -1
+        self.col_idx_qty = -1
+        self.col_idx_unit_price = -1
+        
+        self.has_unit_pricing = False
+        self.debug_logs = [] # NEW: For logging
+
     def parse(self, file_content: bytes, filename: str) -> ParsedOffer:
         """Parse flat CSV format"""
-        content_str = file_content.decode('utf-8')
+        try:
+            content_str = file_content.decode('utf-8')
+        except UnicodeDecodeError:
+            # Fallback for files saved with non-standard encoding
+            content_str = file_content.decode('latin-1')
+            self.add_warning("File was not valid UTF-8, used latin-1 fallback.")
+            
         reader = csv.reader(io.StringIO(content_str))
         rows = list(reader)
         
         # Extract metadata
         metadata = self._extract_metadata(rows)
         
-        # Find table start
-        table_start = self._find_table_start(rows)
+        # Find table start and map columns
+        table_start = self._find_table_start_and_map_cols(rows)
         
+        # --- NEW DEBUGGING ---
+        self.add_warning(f"DEBUG: Found table start at row {table_start}")
+        mapped_cols = f"ItemNum={self.col_idx_item_num}, Desc={self.col_idx_desc}, Value={self.col_idx_value}, " \
+                      f"Qty={self.col_idx_qty}, Unit={self.col_idx_unit}, UnitPrice={self.col_idx_unit_price}"
+        self.add_warning(f"DEBUG: Mapped columns: {mapped_cols}")
+        if table_start < len(rows):
+             self.add_warning(f"DEBUG: First data row (raw): {rows[table_start]}")
+        # --- END DEBUGGING ---
+        
+        # We must find these 3 columns to proceed
+        if self.col_idx_item_num == -1 or self.col_idx_desc == -1 or self.col_idx_value == -1:
+            self.add_warning("Could not find all required columns (Item#, Description, Value). Trying legacy format.")
+            # Set default indices for legacy Beautik format as a fallback
+            self.col_idx_item_num = 1  # Col B
+            self.col_idx_desc = 2      # Col C
+            self.col_idx_value = 3     # Col D
+            
+            # Check if these defaults are even valid
+            max_cols = max(len(r) for r in rows) if rows else 0
+            if max(self.col_idx_item_num, self.col_idx_desc, self.col_idx_value) >= max_cols:
+                raise ValueError("Failed to parse flat CSV: Could not find required columns and legacy format is out of bounds.")
+        
+        # Check if we also found unit pricing columns
+        if self.col_idx_qty != -1 and self.col_idx_unit_price != -1:
+            self.has_unit_pricing = True
+            
         # Parse items and auto-categorize
         categories, grand_total = self._parse_items(rows, table_start)
         
@@ -325,13 +410,16 @@ class FlatParser(BaseParser):
         
         offer_id = self._generate_offer_id()
         
+        # Set detail level based on what we found
+        detail_level = DetailLevel.UNIT_PRICES if self.has_unit_pricing else DetailLevel.SUMMARY
+        
         return ParsedOffer(
             offer_id=offer_id,
             project=metadata,
             cost_breakdown=cost_breakdown,
             parsed_at=datetime.now(),
             source_filename=filename,
-            detail_level=DetailLevel.SUMMARY,
+            detail_level=detail_level,
             warnings=self.warnings
         )
     
@@ -343,9 +431,13 @@ class FlatParser(BaseParser):
             if len(rows[i]) < 2:
                 continue
             
-            cell_b = rows[i][1].strip()
-            cell_c = rows[i][2].strip() if len(rows[i]) > 2 else ""
-            
+            # Check for Beautik-style metadata (Key: Value in Col B/C)
+            try:
+                cell_b = rows[i][1].strip()
+                cell_c = rows[i][2].strip() if len(rows[i]) > 2 else ""
+            except IndexError:
+                continue
+
             if ':' in cell_b:
                 key = cell_b.replace(':', '').strip().lower()
                 
@@ -365,60 +457,181 @@ class FlatParser(BaseParser):
         
         return ProjectMetadata(**metadata)
     
-    def _find_table_start(self, rows: List[List[str]]) -> int:
-        """Find table start in Beautik format"""
+    def _find_table_start_and_map_cols(self, rows: List[List[str]]) -> int:
+        """
+        Find table start row and map column indices from header.
+        """
+        # --- Define all known header variants ---
+        header_keywords_item = ['nr.', 'lp', 'item', 'nr crt']
+        header_keywords_desc = ['description', 'descriptions', 'denumire', 'descriere', 'detalii']
+        header_keywords_value = ['total', 'value', 'valoare', 'val. totala', 'total value']
+        
+        # New keywords for unit pricing
+        header_keywords_unit = ['j.m', 'unit', 'u.m', 'unit of measurement', 'um', 'unitate']
+        header_keywords_qty = ['cantitate', 'qty', 'quantity', 'number of units', 'cant']
+        header_keywords_unit_price = ['unit price', 'price/unit', 'val. unitara', 'pret unitar', 'pu']
+        
         for i, row in enumerate(rows):
-            if len(row) > 2:
-                cell_b = row[1].strip().upper()
-                if 'CENTRALIZATOR' in cell_b or 'NR.' in cell_b:
-                    return i + 1
+            if len(row) < 3:
+                continue
+            
+            found_headers_count = 0
+            
+            for col_idx, cell in enumerate(row):
+                cell_lower = cell.strip().lower().replace('"', '') # Clean cell
+                
+                if cell_lower in header_keywords_item:
+                    self.col_idx_item_num = col_idx
+                    found_headers_count += 1
+                elif cell_lower in header_keywords_desc:
+                    self.col_idx_desc = col_idx
+                    found_headers_count += 1
+                elif cell_lower in header_keywords_value:
+                    self.col_idx_value = col_idx
+                    found_headers_count += 1
+                elif cell_lower in header_keywords_unit:
+                    self.col_idx_unit = col_idx
+                elif cell_lower in header_keywords_qty:
+                    self.col_idx_qty = col_idx
+                elif cell_lower in header_keywords_unit_price:
+                    self.col_idx_unit_price = col_idx
+            
+            # We need at least 3 headers (item, desc, total) to call this a header row
+            if found_headers_count >= 3:
+                # We found a valid header row
+                return i + 1  # Data starts on the next row
+        
+        # Fallback if no headers found
+        self.add_warning("Could not detect header row. Assuming legacy format on row 12.")
         return 12
     
+    def _is_item_number(self, s: str) -> bool:
+        """Check if string is an item number (e.g. '1', '1.1', '8.2')"""
+        s = s.strip()
+        if not s:
+            return False
+        # Check if it's a digit or a float-like string (e.g., "1.1")
+        return s.replace('.', '', 1).isdigit()
+
+    def _safe_get_value(self, row: List[str], index: int) -> str:
+        """Safely get value from row if index is valid"""
+        if index != -1 and index < len(row):
+            val = row[index]
+            if val is None:
+                return ""
+            return str(val).strip()
+        return ""
+    
+    def _parse_float(self, s: str) -> Optional[float]:
+        """Parse a string into a float, handling commas and spaces"""
+        if not s:
+            return None
+        try:
+            # Handle formats like "1,234.56" or "1.234,56" (European)
+            # Standardize to use '.' as decimal separator
+            s_cleaned = s.replace(' ', '').replace(',', '.')
+            
+            # Check if there are multiple '.' which means the first ones are
+            # thousands separators (e.g., "1.234.567,89" -> "1.234.567.89")
+            if s_cleaned.count('.') > 1:
+                parts = s_cleaned.split('.')
+                s_cleaned = "".join(parts[:-1]) + "." + parts[-1]
+                
+            return float(s_cleaned)
+        except (ValueError, TypeError):
+            # Try to handle cases like '8366.7069999999985' which might be read as text
+            try:
+                return float(s)
+            except (ValueError, TypeError):
+                # NEW DEBUGGING
+                self.debug_logs.append(f"Failed to parse float: '{s}'")
+                return None
+
     def _parse_items(
         self,
         rows: List[List[str]],
         start_row: int
     ) -> Tuple[List[CostCategory], float]:
-        """Parse flat items and auto-categorize them"""
+        """Parse flat items and auto-categorize them using mapped columns"""
         items_by_category = {
-            'A': [],
-            'B': [],
-            'C': []
+            'A': [], 'B': [], 'C': []
         }
         grand_total = 0.0
         
+        # Determine the maximum column index we'll need to read
+        all_indices = [
+            self.col_idx_item_num, self.col_idx_desc, self.col_idx_value,
+            self.col_idx_unit, self.col_idx_qty, self.col_idx_unit_price
+        ]
+        max_idx_needed = max(idx for idx in all_indices if idx != -1)
+        if max_idx_needed == -1: # Should be impossible due to check in parse()
+            return [], 0.0 
+
+        parsed_item_count = 0 # NEW DEBUGGING
+        
         for i in range(start_row, len(rows)):
             row = rows[i]
-            if len(row) < 3:
+            if len(row) <= max_idx_needed:
                 continue
             
-            cell_b = row[1].strip()
-            cell_c = row[2].strip()
-            cell_d = row[3].strip() if len(row) > 3 else ""
-            
-            # Check for total row
-            if 'TOTAL' in cell_b.upper():
-                grand_total = parse_eur_value(cell_d) or 0.0
+            try:
+                item_num_str = self._safe_get_value(row, self.col_idx_item_num)
+                desc_str = self._safe_get_value(row, self.col_idx_desc)
+                total_value_str = self._safe_get_value(row, self.col_idx_value)
+            except IndexError:
+                continue # Row is shorter than expected
+
+            # Check for total row (look in both item and desc columns)
+            if 'total' in item_num_str.lower() or 'total' in desc_str.lower():
+                grand_total = self._parse_float(total_value_str) or 0.0
                 break
             
-            # Check for item (numeric)
-            if cell_b.isdigit():
-                value = parse_eur_value(cell_d)
-                if value is None or value == 0:
-                    continue
+            # Check for item (is it a number like "1" or "1.1"?)
+            if self._is_item_number(item_num_str):
+                
+                total_value = self._parse_float(total_value_str)
+                
+                if total_value is None or total_value == 0:
+                    # Don't skip items with 0 value if they have unit pricing
+                    if not (self.has_unit_pricing and total_value == 0):
+                        # NEW DEBUGGING
+                        if i < start_row + 10: # Log first few skips
+                            self.debug_logs.append(f"Skipped row {i}: Item '{item_num_str}' has no value ('{total_value_str}')")
+                        continue
+                
+                # --- Parse Unit Price Data (if columns exist) ---
+                quantity_val = None
+                unit_str = None
+                unit_normalized = None
+                unit_price_val = None
+
+                if self.has_unit_pricing:
+                    unit_str = self._safe_get_value(row, self.col_idx_unit)
+                    quantity_str = self._safe_get_value(row, self.col_idx_qty)
+                    unit_price_str = self._safe_get_value(row, self.col_idx_unit_price)
+
+                    quantity_val = self._parse_float(quantity_str)
+                    unit_price_val = self._parse_float(unit_price_str)
+                    unit_normalized = normalize_unit(unit_str) if unit_str else None
                 
                 # Classify item to determine category
-                category_type, item_type = classify_item(cell_c)
+                category_type, item_type = classify_item(desc_str)
                 
                 item = CostItem(
-                    item_number=cell_b,
-                    description=cell_c,
-                    value_eur=value,
+                    item_number=item_num_str,
+                    description=desc_str,
+                    value_eur=total_value,
                     category_id=category_type.value,
-                    item_type=item_type
+                    item_type=item_type,
+                    # Add unit price data
+                    quantity=quantity_val,
+                    unit=unit_str,
+                    unit_normalized=unit_normalized,
+                    unit_price_eur=unit_price_val
                 )
                 
                 items_by_category[category_type.value].append(item)
+                parsed_item_count += 1 # NEW DEBUGGING
         
         # Create categories from grouped items
         categories = []
@@ -436,6 +649,12 @@ class FlatParser(BaseParser):
         
         if grand_total == 0:
             grand_total = sum(cat.total_eur for cat in categories)
+            
+        # --- NEW DEBUGGING ---
+        self.add_warning(f"DEBUG: Finished parsing. Parsed {parsed_item_count} items.")
+        self.add_warning(f"DEBUG: Calculated Grand Total: {grand_total}")
+        if self.debug_logs:
+             self.add_warning("DEBUG Logs: " + " | ".join(self.debug_logs[:5])) # Show first 5 debug logs
         
         return categories, grand_total
     
@@ -445,8 +664,7 @@ class FlatParser(BaseParser):
         date_str = now.strftime("%Y%m%d")
         counter = 1
         return f"OFF_{date_str}_{counter:03d}"
-
-
+    
 # ============================================================================
 # DETAILED EXCEL PARSER (CCC Pitesti)
 # ============================================================================
@@ -456,7 +674,9 @@ class DetailedExcelParser(BaseParser):
     
     def parse(self, file_content: bytes, filename: str) -> ParsedOffer:
         """Parse detailed Excel format"""
-        wb = load_workbook(io.BytesIO(file_content))
+        
+        # *** FIX IS HERE: Added data_only=True ***
+        wb = load_workbook(io.BytesIO(file_content), data_only=True)
         
         # Find summary sheet
         summary_sheet = self._find_summary_sheet(wb)
@@ -496,6 +716,7 @@ class DetailedExcelParser(BaseParser):
             if 'SUMMARY' in name_upper or 'PODSUMOWANIE' in name_upper:
                 return wb[name]
         
+        self.add_warning("Could not find 'SUMMARY' sheet, using first sheet.")
         # Fallback to first sheet
         return wb[wb.sheetnames[0]]
     
@@ -604,6 +825,7 @@ class DetailedExcelParser(BaseParser):
         # Find header row (contains "OPIS", "WORKS DESCRIPTION", etc.)
         header_row = self._find_header_row(sheet)
         if not header_row:
+            self.add_warning(f"Could not find header row in sheet '{sheet.title}'")
             return items
         
         # Parse data rows
@@ -679,6 +901,65 @@ class DetailedExcelParser(BaseParser):
         counter = 1
         return f"OFF_{date_str}_{counter:03d}"
 
+# ============================================================================
+# NEW: SINGLE-SHEET EXCEL "BRIDGE" PARSER
+# ============================================================================
+
+class SingleSheetExcelParser(BaseParser):
+    """
+    Adapter parser for single-sheet Excel files.
+    Converts the first sheet to CSV bytes in-memory, then routes to
+    the appropriate CSV parser (Flat or Hierarchical).
+    """
+
+    def _convert_sheet_to_csv_bytes(self, sheet: Worksheet) -> bytes:
+        """Converts an openpyxl sheet to in-memory CSV bytes"""
+        csv_data = io.StringIO()
+        writer = csv.writer(csv_data)
+        
+        for row in sheet.iter_rows():
+            # Write cell values, handling None
+            writer.writerow([cell.value if cell.value is not None else "" for cell in row])
+            
+        return csv_data.getvalue().encode('utf-8')
+
+    def parse(self, file_content: bytes, filename: str) -> ParsedOffer:
+        """
+        Loads Excel, converts to CSV, and routes to the correct parser.
+        """
+        try:
+            # *** FIX IS HERE: Added data_only=True ***
+            wb = load_workbook(io.BytesIO(file_content), data_only=True)
+            
+            first_sheet = wb[wb.sheetnames[0]]
+            self.add_warning(f"Parsing single-sheet Excel, using sheet: '{first_sheet.title}'")
+            
+            # Convert the sheet to CSV bytes
+            csv_bytes = self._convert_sheet_to_csv_bytes(first_sheet)
+            
+            # Now, detect the structure of the *CSV data*
+            csv_format = FormatDetector._detect_csv_structure(csv_bytes)
+            
+            if csv_format == OfferFormat.HIERARCHICAL_CSV:
+                self.add_warning("Detected Hierarchical structure in Excel file.")
+                parser = HierarchicalParser()
+            else:
+                self.add_warning("Detected Flat structure in Excel file.")
+                parser = FlatParser()
+            
+            # Call the chosen parser with the new CSV bytes
+            parsed_offer = parser.parse(csv_bytes, filename)
+            
+            # Append warnings from this adapter and the sub-parser
+            all_warnings = self.warnings + parser.warnings
+            parsed_offer.warnings = all_warnings
+            
+            return parsed_offer
+
+        except Exception as e:
+            self.add_warning(f"Failed to parse single-sheet Excel: {e}")
+            raise ValueError(f"Failed to read single-sheet Excel file: {str(e)}")
+
 
 # ============================================================================
 # MAIN PARSER SERVICE
@@ -711,8 +992,13 @@ class OfferParserService:
             parser = FlatParser()
         elif detected_format == OfferFormat.DETAILED_EXCEL:
             parser = DetailedExcelParser()
+        elif detected_format == OfferFormat.SINGLE_SHEET_EXCEL:
+            # NEW: Route to the adapter
+            parser = SingleSheetExcelParser()
         else:
-            raise ValueError(f"Unsupported format: {detected_format}")
+            # Fallback to FlatParser for safety
+            self.add_warning(f"Unknown format detected, falling back to FlatParser.")
+            parser = FlatParser()
         
         # Parse
         try:
@@ -726,4 +1012,5 @@ class OfferParserService:
             return parsed_offer
             
         except Exception as e:
-            raise ValueError(f"Parsing failed: {str(e)}")
+            # Re-raise with more context
+            raise ValueError(f"Parsing failed for format '{detected_format}': {str(e)}")
