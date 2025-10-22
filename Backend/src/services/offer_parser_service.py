@@ -527,10 +527,13 @@ class FlatParser(BaseParser):
         if not s:
             return None
         try:
-            # Handle formats like "1,234.56" or "1.234,56" (European)
-            # Standardize to use '.' as decimal separator
-            s_cleaned = s.replace(' ', '').replace(',', '.')
-            
+            # Clean currency symbols, letters, and all spaces
+            s_cleaned = str(s)
+            s_cleaned = s_cleaned.replace(' ', '')
+            s_cleaned = s_cleaned.replace('€', '').replace('$', '')
+            s_cleaned = s_cleaned.replace('PLN', '').replace('RON', '').replace('EUR', '')
+            s_cleaned = s_cleaned.replace(',', '.')
+        
             # Check if there are multiple '.' which means the first ones are
             # thousands separators (e.g., "1.234.567,89" -> "1.234.567.89")
             if s_cleaned.count('.') > 1:
