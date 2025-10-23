@@ -715,11 +715,12 @@ class DetailedExcelParser(BaseParser):
     def _find_summary_sheet(self, wb) -> object:
         """Find the summary sheet"""
         for name in wb.sheetnames:
-            name_upper = name.upper()
-            if 'SUMMARY' in name_upper or 'PODSUMOWANIE' in name_upper:
+            name_upper = name.upper().strip()
+            # ADDED 'CENTRALIZATOR'
+            if 'SUMMARY' in name_upper or 'PODSUMOWANIE' in name_upper or 'CENTRALIZATOR' in name_upper:
                 return wb[name]
         
-        self.add_warning("Could not find 'SUMMARY' sheet, using first sheet.")
+        self.add_warning("Could not find 'SUMMARY' or 'CENTRALIZATOR' sheet, using first sheet.")
         # Fallback to first sheet
         return wb[wb.sheetnames[0]]
     
@@ -757,59 +758,117 @@ class DetailedExcelParser(BaseParser):
         """Parse category totals from summary sheet"""
         totals = {}
         
-        for row_idx in range(1, 30):
-            cell_a = sheet.cell(row_idx, 1).value
-            if not cell_a:
-                continue
-            
-            cell_str = str(cell_a).lower()
-            cell_d = sheet.cell(row_idx, 4).value
-            
-            if 'budowlanka' in cell_str or 'construction' in cell_str:
-                totals['construction'] = float(cell_d) if cell_d else 0.0
-            elif 'elektryka' in cell_str or 'electric' in cell_str:
-                totals['electrical'] = float(cell_d) if cell_d else 0.0
-            elif 'dodatkowe' in cell_str or 'additional' in cell_str:
-                totals['additional'] = float(cell_d) if cell_d else 0.0
+        # Check header to see if this is Vivo format
+        header_cell_b = str(sheet.cell(1, 2).value).strip().lower()
+        is_vivo_format = 'categorii' in header_cell_b
+
+        if is_vivo_format:
+            # New VIVO format: Nr. | Categorii | Valoare
+            for row_idx in range(2, 30): # Start from row 2
+                cell_b_val = sheet.cell(row_idx, 2).value # Col B: Category Name
+                if not cell_b_val:
+                    continue # Stop when we run out of categories
+                
+                cell_c_val = sheet.cell(row_idx, 3).value # Col C: Value
+                
+                # Clean name to use as a key
+                name_key = str(cell_b_val).lower().strip()
+                value = float(cell_c_val) if cell_c_val else 0.0
+                
+                totals[name_key] = value
+        
+        else:
+            # Old CCC format
+            for row_idx in range(1, 30):
+                cell_a = sheet.cell(row_idx, 1).value
+                if not cell_a:
+                    continue
+                
+                cell_str = str(cell_a).lower()
+                cell_d = sheet.cell(row_idx, 4).value
+                
+                if 'budowlanka' in cell_str or 'construction' in cell_str:
+                    totals['construction'] = float(cell_d) if cell_d else 0.0
+                elif 'elektryka' in cell_str or 'electric' in cell_str:
+                    totals['electrical'] = float(cell_d) if cell_d else 0.0
+                elif 'dodatkowe' in cell_str or 'additional' in cell_str:
+                    totals['additional'] = float(cell_d) if cell_d else 0.0
         
         return totals
     
     def _parse_detailed_sheets(self, wb, summary_totals: Dict) -> List[CostCategory]:
-        """Parse detailed breakdown sheets"""
+        """Parse detailed breakdown sheets based on summary totals"""
         categories = []
         
-        # Look for construction sheet
-        construction_sheet = self._find_sheet_by_keywords(
-            wb, ['BUDOWLANKA', 'CONSTRUCTION']
-        )
-        if construction_sheet:
-            items = self._parse_detail_sheet(construction_sheet)
-            if items:
-                total = summary_totals.get('construction', sum(i.value_eur for i in items))
-                category = CostCategory(
-                    category_id='A',
-                    name='Construction Works',
-                    items=items,
-                    total_eur=total
-                )
-                categories.append(category)
-        
-        # Look for electrical sheet
-        electrical_sheet = self._find_sheet_by_keywords(
-            wb, ['ELEKTRYKA', 'ELECTRIC']
-        )
-        if electrical_sheet:
-            items = self._parse_detail_sheet(electrical_sheet)
-            if items:
-                total = summary_totals.get('electrical', sum(i.value_eur for i in items))
-                category = CostCategory(
-                    category_id='B',
-                    name='Electrical Works',
-                    items=items,
-                    total_eur=total
-                )
-                categories.append(category)
-        
+        # Loop through the categories found in the summary
+        for category_key, category_total in summary_totals.items():
+            
+            sheet_keywords = []
+            category_id = CategoryType.UNKNOWN.value # Default
+            category_name = category_key.title()
+
+            # Map summary keys to sheet names and Category IDs
+            if 'arhitectura' in category_key:
+                sheet_keywords = ['ARHITECTURA']
+                category_id = CategoryType.A_ARCHITECTURAL.value
+                category_name = 'Lucrari de Arhitectura'
+            
+            elif 'demolare' in category_key:
+                sheet_keywords = ['DEMOLARE']
+                category_id = CategoryType.A_ARCHITECTURAL.value # Group demo under Archi
+                category_name = 'Lucrari de Demolare'
+            
+            elif 'mep' in category_key or 'instalatii' in category_key:
+                sheet_keywords = ['MEP', 'INSTALATII']
+                category_id = CategoryType.B_MEP.value
+                category_name = 'Lucrari MEP'
+            
+            elif 'preliminarii' in category_key:
+                sheet_keywords = ['PRELIMINARII']
+                category_id = CategoryType.C_PROFESSIONAL.value
+                category_name = 'Preliminarii'
+
+            elif 'construction' in category_key or 'budowlanka' in category_key:
+                # Handle old CCC format
+                sheet_keywords = ['BUDOWLANKA', 'CONSTRUCTION']
+                category_id = CategoryType.A_ARCHITECTURAL.value
+                category_name = 'Construction Works'
+                
+            elif 'electric' in category_key or 'elektryka' in category_key:
+                # Handle old CCC format
+                sheet_keywords = ['ELEKTRYKA', 'ELECTRIC']
+                category_id = CategoryType.B_MEP.value
+                category_name = 'Electrical Works'
+
+            if not sheet_keywords:
+                self.add_warning(f"Skipping unknown category from summary: '{category_key}'")
+                continue
+
+            # Find the corresponding sheet
+            sheet = self._find_sheet_by_keywords(wb, sheet_keywords)
+            
+            if sheet:
+                # Find header row and format type
+                header_row, format_type = self._find_header_row_and_format(sheet)
+                if not header_row:
+                    self.add_warning(f"Could not find header row in sheet: '{sheet.title}'")
+                    continue
+                
+                # Parse items using the detected format
+                items = self._parse_detail_sheet(sheet, header_row, format_type)
+                
+                if items:
+                    # Use total from summary
+                    category = CostCategory(
+                        category_id=category_id,
+                        name=category_name,
+                        items=items,
+                        total_eur=category_total 
+                    )
+                    categories.append(category)
+            else:
+                 self.add_warning(f"Could not find detail sheet for category: '{category_key}'")
+
         return categories
     
     def _find_sheet_by_keywords(self, wb, keywords: List[str]):
@@ -821,44 +880,51 @@ class DetailedExcelParser(BaseParser):
                     return wb[sheet_name]
         return None
     
-    def _parse_detail_sheet(self, sheet) -> List[CostItem]:
+    def _parse_detail_sheet(self, sheet, header_row: int, format_type: str) -> List[CostItem]:
         """Parse detailed sheet with unit prices"""
         items = []
         
-        # Find header row (contains "OPIS", "WORKS DESCRIPTION", etc.)
-        header_row = self._find_header_row(sheet)
-        if not header_row:
-            self.add_warning(f"Could not find header row in sheet '{sheet.title}'")
-            return items
-        
+        # --- Define Column Mappings ---
+        # (Col A is Item Num for both)
+        if format_type == 'vivo':
+            # Vivo format: Descriere(B), U.M(D), Cantitate(E), Pret Unitar(F), Valoare(G)
+            col_desc = 2
+            col_unit = 4
+            col_qty = 5
+            col_unit_price = 6
+            col_total = 7
+        else: # 'ccc' or default
+            # CCC format: OPIS(C), Unit(D), Price(E), Qty(F), Total(H)
+            col_desc = 3
+            col_unit = 4
+            col_qty = 6       # Note: Qty/Price are swapped vs Vivo
+            col_unit_price = 5
+            col_total = 8
+
         # Parse data rows
-        for row_idx in range(header_row + 2, sheet.max_row + 1):
+        for row_idx in range(header_row + 1, sheet.max_row + 1):
             # Column A: Item number (LP)
             item_num = sheet.cell(row_idx, 1).value
             if not item_num:
                 continue
             
-            # Column C: Description (English)
-            desc = sheet.cell(row_idx, 3).value
+            # --- Use mapped columns ---
+            desc = sheet.cell(row_idx, col_desc).value
             if not desc:
                 continue
             
             desc_str = str(desc).strip()
             
-            # Column D: Unit
-            unit = sheet.cell(row_idx, 4).value
+            unit = sheet.cell(row_idx, col_unit).value
             unit_str = str(unit).strip() if unit else None
             
-            # Column E: Unit price
-            unit_price = sheet.cell(row_idx, 5).value
+            unit_price = sheet.cell(row_idx, col_unit_price).value
             unit_price_val = float(unit_price) if unit_price else None
             
-            # Column F: Quantity
-            quantity = sheet.cell(row_idx, 6).value
+            quantity = sheet.cell(row_idx, col_qty).value
             quantity_val = float(quantity) if quantity else None
             
-            # Column H: Total value
-            total_val = sheet.cell(row_idx, 8).value
+            total_val = sheet.cell(row_idx, col_total).value
             total = float(total_val) if total_val else 0.0
             
             # Skip rows with no value
@@ -887,15 +953,29 @@ class DetailedExcelParser(BaseParser):
         
         return items
     
-    def _find_header_row(self, sheet) -> Optional[int]:
-        """Find header row in sheet"""
+    def _find_header_row_and_format(self, sheet) -> Tuple[Optional[int], Optional[str]]:
+        """
+        Find header row in sheet and return its index and format type.
+        """
+        # Look for headers in first 10 rows
         for row_idx in range(1, 10):
-            cell_value = sheet.cell(row_idx, 3).value
-            if cell_value:
-                cell_str = str(cell_value).upper()
-                if 'DESCRIPTION' in cell_str or 'OPIS' in cell_str:
-                    return row_idx
-        return None
+            # Check for Vivo format (Descriere)
+            # Scan columns B and C for "Descriere"
+            for col_idx in [2, 3]: 
+                cell_value = sheet.cell(row_idx, col_idx).value
+                if cell_value:
+                    cell_str = str(cell_value).strip().lower()
+                    if cell_str == 'descriere':
+                        return row_idx, 'vivo'
+            
+            # Check for CCC format (OPIS / DESCRIPTION)
+            cell_value_c = sheet.cell(row_idx, 3).value
+            if cell_value_c:
+                cell_str_c = str(cell_value_c).upper()
+                if 'DESCRIPTION' in cell_str_c or 'OPIS' in cell_str_c:
+                    return row_idx, 'ccc'
+
+        return None, None
     
     def _generate_offer_id(self) -> str:
         """Generate offer ID"""

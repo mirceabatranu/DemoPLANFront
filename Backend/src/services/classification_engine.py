@@ -64,7 +64,8 @@ def classify_category(
         'hvac', 'electrical', 'elektryka', 'sanitary', 'sanitare',
         'plumbing', 'ventilation', 'wentylacja', 'curenti', 'current',
         'lighting', 'fire', 'bms', 'security', 'audio', 'video',
-        'refrigeration', 'extraction', 'sprinkler'
+        'refrigeration', 'extraction', 'sprinkler', 
+        'water heater', 'sewage system' # Added from Sinsay file
     ]
     
     for keyword in mep_keywords:
@@ -75,7 +76,9 @@ def classify_category(
     professional_keywords = [
         'management', 'conducere', 'design', 'proiectare',
         'permits', 'autorizatii', 'preliminarii', 'preliminaries',
-        'administration', 'supervision', 'insurance', 'warranty'
+        'administration', 'supervision', 'insurance', 'warranty',
+        'documentation', 'supervision', 'waste', 'cleaning', # Added from Sinsay file
+        'instructions', 'as-built', 'equipment'             # Added from Sinsay file
     ]
     
     for keyword in professional_keywords:
@@ -86,7 +89,9 @@ def classify_category(
     architectural_keywords = [
         'demolition', 'construction', 'walls', 'pereti', 'floor',
         'ceiling', 'door', 'window', 'furniture', 'painting',
-        'tiles', 'glass', 'finishes', 'joinery', 'carpentry'
+        'tiles', 'glass', 'finishes', 'joinery', 'carpentry',
+        'wall', 'installation', 'racks', 'gates', 'suspended ceiling', # Added from Sinsay file
+        'meta racks', 'revisions', 'diaphragm'                         # Added from Sinsay file
     ]
     
     for keyword in architectural_keywords:
