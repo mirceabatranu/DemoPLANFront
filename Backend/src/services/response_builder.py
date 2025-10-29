@@ -121,7 +121,8 @@ class ResponseBuilder:
         
         # 4. Next questions (always show)
         if gap_analysis and gap_analysis.prioritized_questions:
-            sections.append(self._build_questions_section(gap_analysis))
+            # sections.append(self._build_questions_section(gap_analysis))
+            pass  #
         
         return "\n\n".join(sections)
     

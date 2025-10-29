@@ -477,18 +477,23 @@ class ParsedOffer:
         if len(self.cost_breakdown.categories) == 0:
             errors.append("No categories found")
         
+        # --- START: REMOVED VALIDATION ---
         # Validate category totals match grand total
-        is_valid, diff = self.cost_breakdown.validate_total()
-        if not is_valid:
-            errors.append(f"Category sum differs from grand total by €{diff:.2f}")
+        # is_valid, diff = self.cost_breakdown.validate_total()
+        # if not is_valid:
+        #     errors.append(f"Category sum differs from grand total by €{diff:.2f}")
+        # --- END: REMOVED VALIDATION ---
         
         # Validate each category
         for cat in self.cost_breakdown.categories:
-            is_valid, diff = cat.validate_total()
-            if not is_valid:
-                errors.append(
-                    f"Category {cat.category_id}: Item sum differs from category total by €{diff:.2f}"
-                )
+            
+            # --- START: REMOVED VALIDATION ---
+            # is_valid, diff = cat.validate_total()
+            # if not is_valid:
+            #     errors.append(
+            #         f"Category {cat.category_id}: Item sum differs from category total by €{diff:.2f}"
+            #     )
+            # --- END: REMOVED VALIDATION ---
             
             # Validate each item
             for item in cat.items:

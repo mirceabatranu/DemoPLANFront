@@ -1788,7 +1788,13 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
     
         # Spatial data
         if context.project_data.get("total_area"):
-            summary_parts.append(f"Suprafață: {context.project_data['total_area']:.2f} mp")
+            # ✅ FIX: Handle cases where total_area might be a string
+            try:
+                area = float(context.project_data['total_area'])
+                summary_parts.append(f"Suprafață: {area:.2f} mp")
+            except (ValueError, TypeError):
+                # Fallback if conversion to float fails
+                summary_parts.append(f"Suprafață: {context.project_data['total_area']}")
     
         if context.project_data.get("total_rooms"):
             summary_parts.append(f"Camere: {context.project_data['total_rooms']}")
