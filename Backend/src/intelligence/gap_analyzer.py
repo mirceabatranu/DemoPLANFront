@@ -4,13 +4,13 @@
 Gap Analysis Engine - Compares available data vs requirements for offer generation
 Generates prioritized, contextual questions based on missing information
 Supports autonomous agent operation with any input scenario
+PHASE 2: Enhanced with LLM-powered contextual question generation
 """
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from enum import Enum
-from typing import Tuple, List, Dict, Any, Optional
 
 logger = logging.getLogger("demoplan.intelligence.gap_analyzer")
 
@@ -179,10 +179,10 @@ class GapAnalyzer:
                 display_name_ro='Cerințe instalații electrice',
                 priority=GapPriority.HIGH,
                 category=DataCategory.TECHNICAL,
-                question_template_ro='Ce cerințe speciale aveți pentru instalațiile electrice? (putere necesară, prize suplimentare, UPS)',
+                question_template_ro='Ce cerințe speciale aveți pentru instalațiile electrice?',
                 validation_rule='text',
-                examples=['UPS pentru server room', 'Prize duble la fiecare birou', 'Iluminat pe senzori'],
-                context_hint='Important pentru dimensionarea tablourilor și circuitelor'
+                examples=['Prize suplimentare pentru IT', 'Iluminat LED dimabil', 'Backup UPS pentru servere'],
+                context_hint='Modificările electrice necesită aprobare ISC'
             ),
             
             'flooring_preferences': DataGap(
@@ -190,43 +190,32 @@ class GapAnalyzer:
                 display_name_ro='Preferințe pardoseli',
                 priority=GapPriority.HIGH,
                 category=DataCategory.MATERIALS,
-                question_template_ro='Ce tip de pardoseală preferați și în ce proporție? (mochetă, LVT, parchet)',
+                question_template_ro='Ce tip de pardoseală doriți în spații?',
                 validation_rule='text',
-                examples=['100% mochetă trafic intens', '60% LVT + 40% mochetă', 'Parchet în birouri, LVT în zone comune'],
-                context_hint='Impactează atât costul cât și termenul de execuție'
-            ),
-            
-            'ceiling_requirements': DataGap(
-                field_name='ceiling_requirements',
-                display_name_ro='Cerințe tavane',
-                priority=GapPriority.HIGH,
-                category=DataCategory.TECHNICAL,
-                question_template_ro='Ce tip de tavan doriți? (fals minerale, gips-carton, acoustic)',
-                validation_rule='text',
-                examples=['Plăci minerale Armstrong', 'Gips-carton cu benzi LED integrate', 'Panouri acustice suspendate'],
-                context_hint='Tavanul influențează acustica și estetica spațiului'
-            ),
-            
-            'lighting_preferences': DataGap(
-                field_name='lighting_preferences',
-                display_name_ro='Preferințe iluminat',
-                priority=GapPriority.HIGH,
-                category=DataCategory.MATERIALS,
-                question_template_ro='Ce tip de iluminat preferați? (LED integrat, corpuri suspendate, spoturi)',
-                validation_rule='text',
-                examples=['LED panel 60x60 integrat în tavan', 'Corpuri suspendate design', 'Benzi LED + spoturi'],
-                context_hint='Iluminatul corect crește productivitatea cu până la 15%'
+                examples=['Gresie 60x60', 'Parchet laminat', 'Vinyl LVT', 'Covor modular'],
+                context_hint='Pardoseala influențează confortul și costul de întreținere'
             ),
             
             # ============================================================
             # MEDIUM PRIORITY - Improves offer quality
             # ============================================================
-            'partition_requirements': DataGap(
-                field_name='partition_requirements',
-                display_name_ro='Cerințe pereți despărțitori',
+            'ceiling_requirements': DataGap(
+                field_name='ceiling_requirements',
+                display_name_ro='Cerințe tavane',
                 priority=GapPriority.MEDIUM,
                 category=DataCategory.TECHNICAL,
-                question_template_ro='Ce tip de pereți despărțitori preferați? (gips-carton, sticlă, mobile)',
+                question_template_ro='Ce tip de tavan doriți? (fals, liber aparent, combinat)',
+                validation_rule='text',
+                examples=['Tavan fals gips-carton', 'Tavan liber aparent industrial', 'Tavan modular Armstrong'],
+                context_hint='Tavanele false permit ascunderea instalațiilor dar reduc înălțimea utilă'
+            ),
+            
+            'partition_requirements': DataGap(
+                field_name='partition_requirements',
+                display_name_ro='Cerințe compartimentare',
+                priority=GapPriority.MEDIUM,
+                category=DataCategory.TECHNICAL,
+                question_template_ro='Ce tipuri de pereți doriți pentru compartimentare? (gips-carton, sticlă, mobile)',
                 validation_rule='text',
                 examples=['Gips-carton simplu', 'Pereți sticlă pentru săli meeting', 'Combinație gips + sticlă'],
                 context_hint='Pereții din sticlă sunt cu 40% mai scumpi dar dau transparență'
@@ -333,6 +322,7 @@ class GapAnalyzer:
     ) -> GapAnalysisResult:
         """
         Comprehensive gap analysis across all data sources
+        PHASE 2: Enhanced with LLM-powered contextual questions
         
         Args:
             dxf_data: Data extracted from DXF plans
@@ -370,17 +360,19 @@ class GapAnalyzer:
         can_generate = self._can_generate_offer(critical_gaps, confidence)
         
         # Step 6: Generate prioritized questions
+        # PHASE 2: Try LLM-powered questions first, fallback to templates
         file_context = self._extract_file_context(dxf_data, rfp_data)
+        
         questions = await self._generate_contextual_questions_with_llm(
             critical_gaps, high_gaps, available_data, file_context
         )
-
+        
         # Fallback to template-based if LLM fails
         if not questions or len(questions) < 3:
             logger.info("📝 Using template-based questions (LLM unavailable or insufficient)")
             questions = self._generate_prioritized_questions(
-            critical_gaps, high_gaps, medium_gaps, low_gaps, available_data
-        )
+                critical_gaps, high_gaps, medium_gaps, low_gaps, available_data
+            )
         
         # Step 7: Calculate category completeness
         completeness = self._calculate_category_completeness(available_data)
@@ -430,192 +422,66 @@ class GapAnalyzer:
                 inventory['total_area'] = dxf_analysis['total_area']
             
             if dxf_analysis.get('total_rooms'):
-                inventory['room_count'] = dxf_analysis['total_rooms']
+                inventory['total_rooms'] = dxf_analysis['total_rooms']
             
             if dxf_analysis.get('has_hvac'):
                 inventory['has_existing_hvac'] = True
-                hvac_inv = dxf_analysis.get('hvac_inventory', [])
-                if hvac_inv:
-                    inventory['hvac_count'] = len(hvac_inv)
+                inventory['hvac_count'] = len(dxf_analysis.get('hvac_inventory', []))
             
             if dxf_analysis.get('has_electrical'):
                 inventory['has_existing_electrical'] = True
-                elec_inv = dxf_analysis.get('electrical_inventory', [])
-                if elec_inv:
-                    inventory['electrical_count'] = len(elec_inv)
+                inventory['electrical_count'] = len(dxf_analysis.get('electrical_inventory', []))
             
-            # Room types can hint at project type
-            room_breakdown = dxf_analysis.get('room_breakdown', [])
-            if room_breakdown:
-                inventory['room_types'] = [r.get('type') for r in room_breakdown]
+            if dxf_analysis.get('has_dimensions'):
+                inventory['has_dimensions'] = True
         
         # From RFP data
         if rfp_data:
             project_info = rfp_data.get('project_info', {})
-            timeline = rfp_data.get('timeline', {})
             financial = rfp_data.get('financial', {})
-            scope = rfp_data.get('scope', {})
+            timeline = rfp_data.get('timeline', {})
             
-            if project_info.get('client'):
-                inventory['client_name'] = project_info['client']
+            if project_info.get('client_name'):
+                inventory['client_name'] = project_info['client_name']
             
             if project_info.get('location'):
                 inventory['location'] = project_info['location']
             
-            if timeline.get('work_start') and timeline.get('work_end'):
+            if financial.get('budget_amount'):
+                inventory['budget_range'] = financial['budget_amount']
+            elif financial.get('budget_min') and financial.get('budget_max'):
+                inventory['budget_range'] = f"{financial['budget_min']} - {financial['budget_max']}"
+            
+            if timeline.get('work_start_date'):
                 inventory['work_timeline'] = {
-                    'start': timeline['work_start'],
-                    'end': timeline['work_end'],
-                    'duration_days': timeline.get('duration_days')
+                    'start': timeline['work_start_date'],
+                    'end': timeline.get('work_end_date'),
+                    'duration_days': timeline.get('work_duration_days')
                 }
-            
-            if financial.get('guarantee_months'):
-                inventory['guarantee_period'] = financial['guarantee_months']
-            
-            if financial.get('performance_bond'):
-                inventory['performance_bond'] = financial['performance_bond']
-            
-            if financial.get('currency'):
-                inventory['currency'] = financial['currency']
-            
-            # Try to infer finish level from scope
-            scope_items = scope.get('items', [])
-            scope_text = ' '.join(scope_items).lower()
-            if 'premium' in scope_text or 'luxury' in scope_text:
-                inventory['finish_level'] = 'premium'
-            elif 'standard' in scope_text:
-                inventory['finish_level'] = 'standard'
-            
-            # Check for specific requirements in scope
-            if any('hvac' in item.lower() or 'climatizare' in item.lower() for item in scope_items):
-                inventory['hvac_in_scope'] = True
-            
-            if any('electric' in item.lower() for item in scope_items):
-                inventory['electrical_in_scope'] = True
         
-        # From explicit user requirements
+        # From user requirements
         if user_req:
-            # Direct mapping of user-provided data
             for key, value in user_req.items():
-                if value is not None and value != '' and value != 0:
+                if value and key not in inventory:
                     inventory[key] = value
         
-        # From conversation history (extract implicit requirements)
+        # From conversation
         if conversation:
-            extracted = self._extract_from_conversation(conversation)
-            inventory.update(extracted)
+            # Extract implicit requirements from conversation
+            # (simplified - could be enhanced with NLP)
+            for message in conversation:
+                content = message.get('content', '').lower()
+                
+                if 'buget' in content or 'pret' in content:
+                    inventory['budget_mentioned'] = True
+                
+                if 'calendar' in content or 'termen' in content:
+                    inventory['timeline_mentioned'] = True
         
         return inventory
     
-    def _extract_file_context(
-        self,
-        dxf_data: Optional[Dict],
-        rfp_data: Optional[Dict]
-    ) -> Dict[str, Any]:
-        """
-        Extract file context for LLM question generation
-        PHASE 2: Provides file metadata to LLM
-        """
-        context = {
-            'has_drawing': False,
-            'has_specification': False,
-            'has_text': False,
-            'drawing_detail_level': 'none',
-            'spec_detail_level': 'none'
-        }
-    
-        # Analyze DXF
-        if dxf_data:
-            dxf_analysis = dxf_data.get('dxf_analysis', {})
-            context['has_drawing'] = True
-        
-            has_rooms = dxf_analysis.get('total_rooms', 0) > 0
-            has_mep = dxf_analysis.get('has_hvac') or dxf_analysis.get('has_electrical')
-            has_dimensions = dxf_analysis.get('has_dimensions', False)
-        
-            if has_rooms and has_mep and has_dimensions:
-                context['drawing_detail_level'] = 'complete'
-            elif has_rooms and has_mep:
-                context['drawing_detail_level'] = 'good'
-            elif has_rooms:
-                context['drawing_detail_level'] = 'basic'
-    
-        # Analyze RFP/PDF
-        if rfp_data:
-            context['has_specification'] = True
-        
-            has_scope = bool(rfp_data.get('scope'))
-            has_materials = bool(rfp_data.get('materials'))
-        
-            if has_scope and has_materials:
-                context['spec_detail_level'] = 'complete'
-            elif has_scope or has_materials:
-                context['spec_detail_level'] = 'partial'
-    
-        return context
-    
-    def _extract_from_conversation(self, conversation: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Extract implicit requirements from conversation history
-        Uses keyword matching and patterns
-        """
-        extracted = {}
-        
-        # Combine all user messages
-        user_messages = []
-        for entry in conversation:
-            if entry.get('type') == 'user':
-                content = entry.get('content') or entry.get('message', '')
-                if content:
-                    user_messages.append(content.lower())
-        
-        full_text = ' '.join(user_messages)
-        
-        # Budget patterns
-        budget_patterns = [
-            r'(\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)\s*(eur|ron|euro|lei)',
-            r'buget[:\s]*(\d+\.?\d*)\s*(eur|ron)',
-            r'maxim\s*(\d+\.?\d*)\s*(eur|ron)'
-        ]
-        
-        import re
-        for pattern in budget_patterns:
-            match = re.search(pattern, full_text)
-            if match:
-                # Extract budget info
-                extracted['budget_mentioned'] = True
-                break
-        
-        # Finish level keywords
-        if 'premium' in full_text or 'lux' in full_text:
-            extracted['finish_level'] = 'premium'
-        elif 'luxury' in full_text:
-            extracted['finish_level'] = 'luxury'
-        elif 'standard' in full_text or 'normal' in full_text:
-            extracted['finish_level'] = 'standard'
-        
-        # Project type keywords
-        if 'renovare' in full_text:
-            extracted['project_type'] = 'renovare'
-        elif 'amenajare' in full_text:
-            extracted['project_type'] = 'amenajare'
-        elif 'modernizare' in full_text:
-            extracted['project_type'] = 'modernizare'
-        
-        # Material preferences
-        if 'mochet' in full_text:
-            extracted['flooring_preferences'] = 'mochetă menționată'
-        if 'lvt' in full_text or 'parchet' in full_text:
-            extracted['flooring_preferences'] = extracted.get('flooring_preferences', '') + ' LVT/parchet menționat'
-        
-        # Timeline urgency
-        if 'urgent' in full_text or 'repede' in full_text or 'rapid' in full_text:
-            extracted['timeline_urgency'] = 'high'
-        
-        return extracted
-    
     def _identify_gaps(self, available_data: Dict[str, Any]) -> List[DataGap]:
-        """Identify which required fields are missing"""
+        """Identify which requirements are missing"""
         gaps = []
         
         for field_name, gap_definition in self.offer_requirements.items():
@@ -696,6 +562,169 @@ class GapAnalyzer:
         logger.info(f"✅ Can generate offer: no critical gaps, confidence {confidence:.1%}")
         return True
     
+    # ============================================================================
+    # PHASE 2: LLM-POWERED CONTEXTUAL QUESTION GENERATION
+    # ============================================================================
+    
+    async def _generate_contextual_questions_with_llm(
+        self,
+        critical_gaps: List[DataGap],
+        high_gaps: List[DataGap],
+        available_data: Dict[str, Any],
+        file_context: Optional[Dict[str, Any]] = None
+    ) -> Optional[List[str]]:
+        """
+        Generate intelligent, context-aware questions using LLM
+        PHASE 2: Adapts to file content and combinations
+        
+        Args:
+            critical_gaps: Critical missing data
+            high_gaps: High priority missing data
+            available_data: Data we already have
+            file_context: Information about uploaded files
+            
+        Returns:
+            List of smart, contextual questions (max 5) or None if failed
+        """
+        try:
+            from src.services.llm_service import safe_construction_call
+            
+            # Build context summary
+            has_dxf = file_context.get('has_drawing', False) if file_context else False
+            has_pdf = file_context.get('has_specification', False) if file_context else False
+            has_txt = file_context.get('has_text', False) if file_context else False
+            
+            dxf_detail = file_context.get('drawing_detail_level', 'none') if file_context else 'none'
+            pdf_detail = file_context.get('spec_detail_level', 'none') if file_context else 'none'
+            
+            # Build available data summary
+            available_summary = []
+            if available_data.get('total_area'):
+                available_summary.append(f"Suprafata: {available_data['total_area']} mp")
+            if available_data.get('total_rooms'):
+                available_summary.append(f"Camere: {available_data['total_rooms']}")
+            if available_data.get('budget_range'):
+                available_summary.append(f"Buget: {available_data['budget_range']}")
+            
+            available_text = ", ".join(available_summary) if available_summary else "Nicio informatie de baza"
+            
+            # Build gaps list
+            all_gaps = critical_gaps + high_gaps[:3]  # Max 5 total gaps
+            gaps_text = "\n".join([
+                f"- {gap.display_name_ro}: {gap.question_template_ro}"
+                for gap in all_gaps
+            ])
+            
+            # Build LLM prompt
+            prompt = f"""Esti un expert in proiecte de constructii care genereaza intrebari inteligente pentru clienti.
+
+CONTEXT FISIERE INCARCATE:
+- Plan DXF: {'DA' if has_dxf else 'NU'} (nivel detaliu: {dxf_detail})
+- Specificatii PDF: {'DA' if has_pdf else 'NU'} (nivel detaliu: {pdf_detail})
+- Document text: {'DA' if has_txt else 'NU'}
+
+DATE DISPONIBILE:
+{available_text}
+
+INFORMATII LIPSA (prioritare):
+{gaps_text}
+
+SARCINA:
+Genereaza maxim 5 intrebari SPECIFICE si CONTEXTUALE pentru client.
+
+REGULI OBLIGATORII:
+1. Intrebarile trebuie sa fie SPECIFICE la fisierele incarcate
+2. Daca exista DXF dar lipsesc specificatii -> intreaba despre finisaje/materiale
+3. Daca exista PDF dar lipseste DXF -> intreaba despre dimensiuni/suprafete
+4. Daca exista ambele dar lipseste buget -> intreaba despre buget cu context
+5. Foloseste informatii din fisiere pentru intrebari mai bune
+
+EXEMPLE BUNE:
+- "Am vazut in plan ca aveti 5 camere. Ce nivel de finisaje doriti pentru fiecare? (standard/premium/luxury)"
+- "Specificatiile mentioneaza sistem VRV. Aveti preferinta pentru brand? (Daikin, Mitsubishi, etc.)"
+- "Planul arata 120mp. Care este bugetul estimat pentru aceasta suprafata?"
+
+EXEMPLE RELE (prea generice, evita-le):
+- "Ce buget aveti?" (fara context)
+- "Cand doriti sa inceapa lucrarile?" (fara legatura cu fisiere)
+
+Raspunde DOAR cu intrebarile, cate una per linie, fara numerotare:"""
+
+            # Call LLM
+            llm_response = await safe_construction_call(
+                user_input=prompt,
+                system_prompt="Esti un expert in intrebari contextuale pentru constructii. Raspunzi DOAR cu intrebarile, fara explicatii.",
+                temperature=0.7
+            )
+            
+            # Parse response
+            questions = [
+                q.strip().lstrip('-').lstrip('•').strip()
+                for q in llm_response.strip().split('\n')
+                if q.strip() and len(q.strip()) > 10
+            ]
+            
+            # Limit to 5 questions
+            questions = questions[:5]
+            
+            if len(questions) >= 3:
+                logger.info(f"✅ Generated {len(questions)} contextual questions with LLM")
+                return questions
+            else:
+                logger.warning(f"⚠️ LLM generated only {len(questions)} questions, falling back")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ LLM question generation failed: {e}")
+            return None
+    
+    def _extract_file_context(
+        self,
+        dxf_data: Optional[Dict],
+        rfp_data: Optional[Dict]
+    ) -> Dict[str, Any]:
+        """
+        Extract file context for LLM question generation
+        PHASE 2: Provides file metadata to LLM
+        """
+        context = {
+            'has_drawing': False,
+            'has_specification': False,
+            'has_text': False,
+            'drawing_detail_level': 'none',
+            'spec_detail_level': 'none'
+        }
+        
+        # Analyze DXF
+        if dxf_data:
+            dxf_analysis = dxf_data.get('dxf_analysis', {})
+            context['has_drawing'] = True
+            
+            has_rooms = dxf_analysis.get('total_rooms', 0) > 0
+            has_mep = dxf_analysis.get('has_hvac') or dxf_analysis.get('has_electrical')
+            has_dimensions = dxf_analysis.get('has_dimensions', False)
+            
+            if has_rooms and has_mep and has_dimensions:
+                context['drawing_detail_level'] = 'complete'
+            elif has_rooms and has_mep:
+                context['drawing_detail_level'] = 'good'
+            elif has_rooms:
+                context['drawing_detail_level'] = 'basic'
+        
+        # Analyze RFP/PDF
+        if rfp_data:
+            context['has_specification'] = True
+            
+            has_scope = bool(rfp_data.get('scope'))
+            has_materials = bool(rfp_data.get('materials'))
+            
+            if has_scope and has_materials:
+                context['spec_detail_level'] = 'complete'
+            elif has_scope or has_materials:
+                context['spec_detail_level'] = 'partial'
+        
+        return context
+    
     def _generate_prioritized_questions(
         self,
         critical: List[DataGap],
@@ -705,7 +734,7 @@ class GapAnalyzer:
         available_data: Dict[str, Any]
     ) -> List[str]:
         """
-        Generate maximum 5 prioritized questions
+        Generate maximum 5 prioritized questions (template-based fallback)
         
         Priority order:
         1. All CRITICAL gaps (these block offer)
@@ -732,139 +761,27 @@ class GapAnalyzer:
         
         return questions
     
-        async def _generate_contextual_questions_with_llm(
-        self,
-        critical_gaps: List[DataGap],
-        high_gaps: List[DataGap],
-        available_data: Dict[str, Any],
-        file_context: Optional[Dict[str, Any]] = None
-    ) -> List[str]:
-         """
-         Generate intelligent, context-aware questions using LLM
-         PHASE 2: Adapts to file content and combinations
-    
-         Args:
-             critical_gaps: Critical missing data
-             high_gaps: High priority missing data
-             available_data: Data we already have
-             file_context: Information about uploaded files
+    def _calculate_category_completeness(self, available_data: Dict[str, Any]) -> Dict[str, float]:
+        """Calculate data completeness by category"""
+        category_scores = {}
         
-         Returns:
-            List of smart, contextual questions (max 5)
-         """
-        try:
-            from src.services.llm_service import safe_construction_call
-        
-            # Build context summary
-            has_dxf = file_context.get('has_drawing', False) if file_context else False
-            has_pdf = file_context.get('has_specification', False) if file_context else False
-            has_txt = file_context.get('has_text', False) if file_context else False
-        
-            dxf_detail = file_context.get('drawing_detail_level', 'none') if file_context else 'none'
-            pdf_detail = file_context.get('spec_detail_level', 'none') if file_context else 'none'
-        
-            # Build available data summary
-            available_summary = []
-            if available_data.get('total_area'):
-                available_summary.append(f"Suprafață: {available_data['total_area']} mp")
-            if available_data.get('total_rooms'):
-                available_summary.append(f"Camere: {available_data['total_rooms']}")
-            if available_data.get('budget_range'):
-                available_summary.append(f"Buget: {available_data['budget_range']}")
-        
-            available_text = ", ".join(available_summary) if available_summary else "Nicio informație de bază"
-        
-            # Build gaps list
-            all_gaps = critical_gaps + high_gaps[:3]  # Max 5 total gaps
-            gaps_text = "\n".join([
-                f"- {gap.display_name_ro}: {gap.question_template_ro}"
-                for gap in all_gaps
-            ])
-        
-            # Build LLM prompt
-            prompt = f"""Ești un expert în proiecte de construcții care generează întrebări inteligente pentru clienți.
-
-    CONTEXT FIȘIERE ÎNCĂRCATE:
-    - Plan DXF: {'DA' if has_dxf else 'NU'} (nivel detaliu: {dxf_detail})
-    - Specificații PDF: {'DA' if has_pdf else 'NU'} (nivel detaliu: {pdf_detail})
-    - Document text: {'DA' if has_txt else 'NU'}
-
-    DATE DISPONIBILE:
-    {available_text}
-
-    INFORMAȚII LIPSĂ (prioritare):
-    {gaps_text}
-
-    SARCINĂ:
-    Generează maxim 5 întrebări SPECIFICE și CONTEXTUALE pentru client.
-
-    REGULI OBLIGATORII:
-    1. Întrebările trebuie să fie SPECIFICE la fișierele încărcate
-    2. Dacă există DXF dar lipsesc specificații → întreabă despre finisaje/materiale
-    3. Dacă există PDF dar lipsește DXF → întreabă despre dimensiuni/suprafețe
-    4. Dacă există ambele dar lipsește buget → întreabă despre buget cu context
-    5. Folosește informații din fișiere pentru întrebări mai bune
-
-    EXEMPLE BUNE:
-    - "Am văzut în plan că aveți 5 camere. Ce nivel de finisaje doriți pentru fiecare? (standard/premium/luxury)"
-    - "Specificațiile menționează sistem VRV. Aveți preferință pentru brand? (Daikin, Mitsubishi, etc.)"
-    - "Planul arată 120mp. Care este bugetul estimat pentru această suprafață?"
-
-    EXEMPLE RELE (prea generice, evită-le):
-    - "Ce buget aveți?" (fără context)
-    - "Când doriți să înceapă lucrările?" (fără legătură cu fișiere)
-
-    Răspunde DOAR cu întrebările, câte una per linie, fără numerotare:"""
-
-            # Call LLM
-            llm_response = await safe_construction_call(
-                user_input=prompt,
-                system_prompt="Ești un expert în întrebări contextuale pentru construcții. Răspunzi DOAR cu întrebările, fără explicații.",
-                temperature=0.7
-            )
-        
-            # Parse response
-            questions = [
-                q.strip().lstrip('-').lstrip('•').strip()
-                for q in llm_response.strip().split('\n')
-                if q.strip() and len(q.strip()) > 10
+        for category in DataCategory:
+            category_requirements = [
+                req for req in self.offer_requirements.values()
+                if req.category == category
             ]
-        
-            # Limit to 5 questions
-            questions = questions[:5]
-        
-            if len(questions) >= 3:
-                logger.info(f"✅ Generated {len(questions)} contextual questions with LLM")
-                return questions
-            else:
-                logger.warning(f"⚠️ LLM generated only {len(questions)} questions, falling back")
-                return None
             
-        except Exception as e:
-            logger.error(f"❌ LLM question generation failed: {e}")
-            return None
-    
-        def _calculate_category_completeness(self, available_data: Dict[str, Any]) -> Dict[str, float]:
-            """Calculate data completeness by category"""
-            category_scores = {}
+            if len(category_requirements) == 0:
+                continue
+            
+            filled = sum(
+                1 for req in category_requirements
+                if available_data.get(req.field_name) is not None
+            )
+            
+            category_scores[category.value] = filled / len(category_requirements)
         
-            for category in DataCategory:
-                category_requirements = [
-                    req for req in self.offer_requirements.values()
-                    if req.category == category
-                ]
-            
-                if len(category_requirements) == 0:
-                    continue
-            
-                filled = sum(
-                    1 for req in category_requirements
-                    if available_data.get(req.field_name) is not None
-                )
-            
-                category_scores[category.value] = filled / len(category_requirements)
-        
-            return category_scores
+        return category_scores
     
     def _generate_data_summary(
         self,
@@ -877,13 +794,13 @@ class GapAnalyzer:
         
         # Area information
         if available_data.get('total_area'):
-            summary.append(f"Suprafață: {available_data['total_area']} mp")
+            summary.append(f"Suprafata: {available_data['total_area']} mp")
         
         # Client and location
         if available_data.get('client_name'):
             summary.append(f"Client: {available_data['client_name']}")
         if available_data.get('location'):
-            summary.append(f"Locație: {available_data['location']}")
+            summary.append(f"Locatie: {available_data['location']}")
         
         # Timeline
         if available_data.get('work_timeline'):
@@ -893,13 +810,13 @@ class GapAnalyzer:
                 end = timeline.get('end', '')[:10]
                 duration = timeline.get('duration_days')
                 if start and end:
-                    summary.append(f"Perioadă: {start} - {end} ({duration} zile)")
+                    summary.append(f"Perioada: {start} - {end} ({duration} zile)")
         
         # Budget
         if available_data.get('budget_range'):
             summary.append(f"Buget: {available_data['budget_range']}")
         elif available_data.get('budget_mentioned'):
-            summary.append("Buget: discutat în conversație")
+            summary.append("Buget: discutat in conversatie")
         
         # Finish level
         if available_data.get('finish_level'):
@@ -913,10 +830,10 @@ class GapAnalyzer:
         systems = []
         if available_data.get('has_existing_hvac'):
             hvac_count = available_data.get('hvac_count', 0)
-            systems.append(f"HVAC existent ({hvac_count} unități)")
+            systems.append(f"HVAC existent ({hvac_count} unitati)")
         if available_data.get('has_existing_electrical'):
             elec_count = available_data.get('electrical_count', 0)
-            systems.append(f"Instalații electrice existente ({elec_count} componente)")
+            systems.append(f"Instalatii electrice existente ({elec_count} componente)")
         
         if systems:
             summary.append("Sisteme: " + ", ".join(systems))
@@ -924,49 +841,58 @@ class GapAnalyzer:
         # From RFP
         if rfp_data:
             financial = rfp_data.get('financial', {})
-            if financial.get('guarantee_months'):
-                summary.append(f"Garanție: {financial['guarantee_months']} luni")
-            if financial.get('performance_bond'):
-                summary.append(f"Performance Bond: {financial['performance_bond']}%")
+            if financial.get('payment_terms'):
+                summary.append(f"Termeni plata: {financial['payment_terms']}")
         
         return summary
     
-    def _generate_recommendations(
-        self,
-        gaps: List[DataGap],
-        available_data: Dict[str, Any]
-    ) -> List[str]:
-        """Generate actionable recommendations based on gaps"""
+    def _generate_recommendations(self, gaps: List[DataGap], available_data: Dict[str, Any]) -> List[str]:
+        """Generate recommendations based on gaps and available data"""
         recommendations = []
         
-        critical_count = len([g for g in gaps if g.priority == GapPriority.CRITICAL])
-        high_count = len([g for g in gaps if g.priority == GapPriority.HIGH])
-        
-        if critical_count > 0:
+        # Check for critical gaps
+        critical = [g for g in gaps if g.priority == GapPriority.CRITICAL]
+        if critical:
             recommendations.append(
-                f"⚠️ **Urgent**: {critical_count} informații critice lipsesc - acestea blochează generarea ofertei"
+                f"Completati urgent {len(critical)} informatii critice pentru generarea ofertei"
             )
         
-        if high_count > 3:
+        # Check for high priority gaps
+        high = [g for g in gaps if g.priority == GapPriority.HIGH]
+        if high:
             recommendations.append(
-                f"📋 **Important**: {high_count} informații cu prioritate ridicată lipsesc - acestea vor afecta acuratețea ofertei"
+                f"Furnizati {len(high)} informatii cu prioritate inalta pentru acuratete sporita"
             )
         
-        # Specific recommendations based on data patterns
-        if not available_data.get('budget_range') and not available_data.get('budget_mentioned'):
+        # Specific recommendations based on available data
+        if not available_data.get('has_dimensions') and available_data.get('total_area'):
             recommendations.append(
-                "💰 **Recomandare**: Cunoașterea bugetului ne permite să propunem soluții optime pentru nevoia dumneavoastră"
+                "Plan fara cote - recomandam vizita tehnica pentru masuratori precise"
             )
         
-        if available_data.get('has_existing_hvac') and not available_data.get('hvac_requirements'):
+        if available_data.get('total_area', 0) > 200:
             recommendations.append(
-                "🌡️ **Recomandare**: Detectăm sistem HVAC existent - specificați dacă doriți menținere, upgrade sau înlocuire completă"
+                "Suprafata mare - recomandam planificare in etape pentru optimizare costuri"
             )
         
         if not available_data.get('work_timeline'):
             recommendations.append(
-                "📅 **Recomandare**: Timeline-ul influențează organizarea echipelor și posibilele costuri suplimentare pentru urgențe"
+                "Stabiliti un timeline clar pentru planificare echipe si materiale"
             )
+        
+        if not available_data.get('budget_range'):
+            recommendations.append(
+                "Un buget estimativ ajuta la personalizarea solutiilor tehnice"
+            )
+        
+        # Timeline recommendations
+        timeline = available_data.get('work_timeline')
+        if timeline and isinstance(timeline, dict):
+            duration = timeline.get('duration_days', 0)
+            if duration < 30:
+                recommendations.append(
+                    "Timeline foarte strans - posibile costuri suplimentare pentru urgenta"
+                )
         
         return recommendations
 
@@ -982,11 +908,13 @@ def quick_gap_check(
     project_type: Optional[str] = None
 ) -> Tuple[bool, float, List[str]]:
     """
-    Quick gap check for minimal data scenario
+    Quick gap check for minimal data scenario (synchronous wrapper)
     
     Returns:
         Tuple of (can_generate, confidence, missing_critical_fields)
     """
+    import asyncio
+    
     analyzer = GapAnalyzer()
     
     user_req = {}
@@ -999,7 +927,8 @@ def quick_gap_check(
     if project_type:
         user_req['project_type'] = project_type
     
-    result = analyzer.analyze_gaps(user_requirements=user_req)
+    # Run async function in sync context
+    result = asyncio.run(analyzer.analyze_gaps(user_requirements=user_req))
     
     missing = [gap.field_name for gap in result.critical_gaps]
     
