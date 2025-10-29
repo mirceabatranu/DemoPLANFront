@@ -711,7 +711,7 @@ class UnifiedConstructionAgent:
             context.current_mode = AgentMode.OFFER_GENERATION
 
             # Perform gap analysis
-            gap_result = self.gap_analyzer.analyze_gaps(
+            gap_result = await self.gap_analyzer.analyze_gaps(
                 dxf_data=context.analysis_results.get('dxf_analysis'),
                 rfp_data=context.analysis_results.get('rfp_data'),
                 user_requirements=context.project_data,
@@ -1138,7 +1138,7 @@ class UnifiedConstructionAgent:
         
         # ✅ STEP 1: Perform gap analysis
         logger.info("📊 Performing gap analysis")
-        gap_result = self.gap_analyzer.analyze_gaps(
+        gap_result = await self.gap_analyzer.analyze_gaps(
             dxf_data=consolidated_analysis.get('file_analysis', {}).get('dxf_analysis'),
             rfp_data=consolidated_analysis.get('rfp_data'),
             user_requirements=context.project_data,
@@ -1339,7 +1339,7 @@ Răspunde cu JSON:
         
         # ✅ PERFORM GAP ANALYSIS AFTER USER RESPONSE
         logger.info("🔍 Analyzing gaps after user response")
-        gap_result = self.gap_analyzer.analyze_gaps(
+        gap_result = await self.gap_analyzer.analyze_gaps(
             dxf_data=context.analysis_results.get('file_analysis', {}).get('dxf_analysis'),
             rfp_data=context.analysis_results.get('rfp_data'),
             user_requirements=context.project_data,

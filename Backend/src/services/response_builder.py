@@ -29,7 +29,72 @@ class ResponseBuilder:
         """Initialize response builder with formatting rules"""
         self.max_list_items = 5  # Maximum items to show in lists before truncating
         self.use_emojis = True   # Use emojis for visual hierarchy
+
+    def _analyze_file_context(self, file_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Analyze what files were uploaded and their content depth
+        This drives contextual question generation
+        """
+        if not file_analysis:
+            return {
+                'has_any_files': False,
+                'has_drawing': False,
+                'has_specification': False,
+                'has_text': False,
+                'drawing_detail_level': 'none',
+                'spec_detail_level': 'none'
+            }
+    
+        # Check for DXF
+        dxf_data = file_analysis.get('dxf_analysis', {})
+        has_dxf = bool(dxf_data.get('dxf_analysis'))
+    
+        # Analyze DXF detail level
+        drawing_detail = 'none'
+        if has_dxf:
+            dxf_inner = dxf_data.get('dxf_analysis', {})
+            has_rooms = dxf_inner.get('total_rooms', 0) > 0
+            has_mep = dxf_inner.get('has_hvac') or dxf_inner.get('has_electrical')
+            has_dimensions = dxf_inner.get('has_dimensions', False)
         
+            if has_rooms and has_mep and has_dimensions:
+                drawing_detail = 'complete'
+            elif has_rooms and has_mep:
+                drawing_detail = 'good'
+            elif has_rooms:
+                drawing_detail = 'basic'
+    
+        # Check for PDF
+        pdf_data = file_analysis.get('pdf_analysis', {})
+        has_pdf = bool(pdf_data)
+    
+        # Analyze PDF detail level
+        spec_detail = 'none'
+        if has_pdf:
+            has_specs = len(pdf_data.get('construction_specs', [])) > 0
+            has_materials = len(pdf_data.get('material_references', [])) > 0
+        
+        if has_specs and has_materials:
+            spec_detail = 'complete'
+        elif has_specs or has_materials:
+            spec_detail = 'partial'
+    
+        # Check for TXT
+        txt_data = file_analysis.get('txt_analysis', {})
+        has_txt = bool(txt_data.get('requirements'))
+    
+        return {
+            'has_any_files': has_dxf or has_pdf or has_txt,
+            'has_drawing': has_dxf,
+            'has_specification': has_pdf,
+            'has_text': has_txt,
+            'drawing_detail_level': drawing_detail,
+            'spec_detail_level': spec_detail,
+            'dxf_has_mep': dxf_inner.get('has_hvac') or dxf_inner.get('has_electrical') if has_dxf else False,
+            'dxf_has_dimensions': dxf_inner.get('has_dimensions', False) if has_dxf else False,
+            'pdf_has_scope': has_specs if has_pdf else False
+        }
+    
     def build_file_analysis_response(
         self,
         file_analysis: Dict[str, Any],
@@ -77,7 +142,7 @@ class ResponseBuilder:
             sections.append(self._build_storage_info_section(file_analysis))
 
         # 8. Next Steps - Clear call to action
-        sections.append(self._build_next_steps(gap_analysis, cross_reference))
+        sections.append(self._build_next_steps(gap_analysis, cross_reference, file_analysis))
         
         return "\n\n".join(sections)
     
@@ -744,33 +809,55 @@ class ResponseBuilder:
     def _build_next_steps(
         self,
         gap_analysis: Any,
-        cross_reference: Optional[Dict[str, Any]]
+        cross_reference: Optional[Dict[str, Any]],
+        file_analysis: Optional[Dict[str, Any]] = None  # ✅ NEW PARAMETER
     ) -> str:
-        """Build next steps / call to action section"""
+        """
+        Build adaptive next steps based on files uploaded and gaps
+        PHASE 1: File-aware questions
+        """
         lines = []
         lines.append("## 📋 PAȘI URMĂTORI\n")
-        
+    
+        # ✅ PHASE 1: Analyze file context
+        file_context = self._analyze_file_context(file_analysis) if file_analysis else {}
+    
         # Check for blocking issues
         has_critical_gaps = gap_analysis and len(gap_analysis.critical_gaps) > 0
         has_critical_conflicts = (cross_reference and 
-                                 cross_reference.get('error_count', 0) > 0)
-        
+                             cross_reference.get('error_count', 0) > 0)
+    
         can_generate = gap_analysis and gap_analysis.can_generate_offer
-        
+    
+        # CRITICAL CONFLICTS - blocks everything
         if has_critical_conflicts:
             lines.append("### 🔴 Urgent: Rezolvați Conflictele Critice")
             lines.append("Conflictele critice detectate blochează generarea ofertei.")
             lines.append("Vă rugăm să clarificați inconsistențele menționate mai sus.\n")
-        
+            return "\n".join(lines)
+    
+        # CRITICAL GAPS - need data
         if has_critical_gaps:
             critical_count = len(gap_analysis.critical_gaps)
             lines.append(f"### 📝 Informații Critice Necesare ({critical_count})")
-            lines.append("Pentru a genera oferta, vă rugăm să furnizați:\n")
-            
-            # Show critical questions
+        
+            # ✅ PHASE 1: File-context aware message
+            if file_context.get('has_drawing') and not file_context.get('has_specification'):
+                lines.append("Am analizat planul tehnic. Pentru ofertă completă, mai necesit:\n")
+            elif file_context.get('has_specification') and not file_context.get('has_drawing'):
+                lines.append("Am analizat specificațiile. Pentru calcule precise, mai necesit:\n")
+            elif file_context.get('has_drawing') and file_context.get('has_specification'):
+                lines.append("Am analizat desenul și specificațiile. Mai necesit câteva detalii:\n")
+            else:
+                lines.append("Pentru a genera oferta, vă rugăm să furnizați:\n")
+        
+            # Show critical questions with file context
             if gap_analysis.prioritized_questions:
                 for i, question in enumerate(gap_analysis.prioritized_questions[:5], 1):
                     lines.append(f"**{i}.** {question}\n")
+        
+            # ✅ PHASE 1: File-specific guidance
+            lines.append(self._build_file_specific_guidance(file_context, gap_analysis))
         
         elif can_generate:
             lines.append("### ✨ Gata de Generare Ofertă!")
@@ -779,21 +866,20 @@ class ResponseBuilder:
             lines.append("*Comandă*: \"Generează oferta\" sau \"Vreau oferta\"")
         
         else:
-            # Show non-critical questions
+            # Non-critical - show improvement suggestions
             if gap_analysis and gap_analysis.prioritized_questions:
                 lines.append("### 💬 Întrebări pentru Îmbunătățirea Ofertei")
                 lines.append("Răspunsurile la aceste întrebări vor crește acuratețea ofertei:\n")
-                
+            
                 for i, question in enumerate(gap_analysis.prioritized_questions[:5], 1):
                     lines.append(f"**{i}.** {question}\n")
-        
+    
         # Progress indicator
         if gap_analysis:
-            total_requirements = 20  # Approximate total
+            total_requirements = 20
             filled = int(gap_analysis.overall_confidence * total_requirements)
-            
             lines.append(f"\n**Progres**: {filled}/{total_requirements} cerințe completate ({gap_analysis.overall_confidence:.0%})")
-        
+    
         return "\n".join(lines)
     
     def _build_questions_section(self, gap_analysis: Any) -> str:
@@ -808,6 +894,64 @@ class ResponseBuilder:
             lines.append(f"**{i}.** {question}\n")
         
         return "\n".join(lines)
+    
+    def _build_file_specific_guidance(
+        self,
+        file_context: Dict[str, Any],
+        gap_analysis: Any
+    ) -> str:
+        """
+        Generate file-specific guidance based on what's uploaded
+        PHASE 1: Context-aware suggestions
+        """
+        lines = []
+        lines.append("\n### 💡 Sugestii bazate pe fișierele dumneavoastră:\n")
+    
+        has_drawing = file_context.get('has_drawing')
+        has_spec = file_context.get('has_specification')
+        drawing_level = file_context.get('drawing_detail_level', 'none')
+    
+        # DXF only - basic
+        if has_drawing and not has_spec and drawing_level == 'basic':
+            lines.append("✓ Am identificat camerele din plan")
+            lines.append("✗ Lipsesc detalii MEP (instalații electrice, HVAC)")
+            lines.append("✗ Nu am găsit specificații de materiale\n")
+            lines.append("**Recomandare:** Încărcați un PDF cu detalii despre:")
+            lines.append("  • Tipuri de finisaje dorite")
+            lines.append("  • Sistemul de climatizare preferat")
+            lines.append("  • Nivel de finisaje (standard/premium/luxury)")
+    
+        # DXF only - good detail
+        elif has_drawing and not has_spec and drawing_level == 'good':
+            lines.append("✓ Am identificat camerele și instalațiile MEP din plan")
+            lines.append("✗ Nu am găsit specificații despre finisaje și materiale\n")
+            lines.append("**Recomandare:** Adăugați informații despre:")
+            lines.append("  • Nivel finisaje dorit")
+            lines.append("  • Buget estimat")
+            lines.append("  • Timeline lucrări")
+    
+        # PDF/Spec only
+        elif has_spec and not has_drawing:
+            lines.append("✓ Am identificat cerințele din specificații")
+            lines.append("✗ Lipsește desenul tehnic pentru calcul cantități\n")
+            lines.append("**Recomandare:** Încărcați:")
+            lines.append("  • Plan arhitectură (.DXF) pentru calcule precise")
+            lines.append("  • SAU furnizați suprafețe și dimensiuni în text")
+    
+        # Both files but missing critical data
+        elif has_drawing and has_spec:
+            # Check what's actually missing from gaps
+            critical_gaps = gap_analysis.critical_gaps if gap_analysis else []
+            gap_names = [g.field_name for g in critical_gaps]
+        
+            if 'budget_range' in gap_names:
+                lines.append("✓ Am desenul și specificațiile complete")
+                lines.append("✗ Lipsește bugetul estimat pentru adaptarea soluțiilor\n")
+            elif 'finish_level' in gap_names:
+                lines.append("✓ Am desenul și specificațiile de bază")
+                lines.append("✗ Lipsește nivelul de finisaje dorit\n")
+    
+        return "\n".join(lines) if len(lines) > 1 else ""
     
     def _build_compact_status(
         self,
