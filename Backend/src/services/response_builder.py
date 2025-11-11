@@ -51,15 +51,18 @@ class ResponseBuilder:
     
         # Analyze DXF detail level
         drawing_detail = 'none'
+        dxf_has_mep = False
+        dxf_has_dimensions = False
+    
         if has_dxf:
             dxf_inner = dxf_data.get('dxf_analysis', {})
             has_rooms = dxf_inner.get('total_rooms', 0) > 0
-            has_mep = dxf_inner.get('has_hvac') or dxf_inner.get('has_electrical')
-            has_dimensions = dxf_inner.get('has_dimensions', False)
+            dxf_has_mep = dxf_inner.get('has_hvac') or dxf_inner.get('has_electrical')
+            dxf_has_dimensions = dxf_inner.get('has_dimensions', False)
         
-            if has_rooms and has_mep and has_dimensions:
+            if has_rooms and dxf_has_mep and dxf_has_dimensions:
                 drawing_detail = 'complete'
-            elif has_rooms and has_mep:
+            elif has_rooms and dxf_has_mep:
                 drawing_detail = 'good'
             elif has_rooms:
                 drawing_detail = 'basic'
@@ -70,14 +73,18 @@ class ResponseBuilder:
     
         # Analyze PDF detail level
         spec_detail = 'none'
+        pdf_has_scope = False
+    
         if has_pdf:
+            # ✅ FIX: Initialize variables BEFORE using them
             has_specs = len(pdf_data.get('construction_specs', [])) > 0
             has_materials = len(pdf_data.get('material_references', [])) > 0
+            pdf_has_scope = has_specs
         
-        if has_specs and has_materials:
-            spec_detail = 'complete'
-        elif has_specs or has_materials:
-            spec_detail = 'partial'
+            if has_specs and has_materials:
+                spec_detail = 'complete'
+            elif has_specs or has_materials:
+                spec_detail = 'partial'
     
         # Check for TXT
         txt_data = file_analysis.get('txt_analysis', {})
@@ -90,9 +97,9 @@ class ResponseBuilder:
             'has_text': has_txt,
             'drawing_detail_level': drawing_detail,
             'spec_detail_level': spec_detail,
-            'dxf_has_mep': dxf_inner.get('has_hvac') or dxf_inner.get('has_electrical') if has_dxf else False,
-            'dxf_has_dimensions': dxf_inner.get('has_dimensions', False) if has_dxf else False,
-            'pdf_has_scope': has_specs if has_pdf else False
+            'dxf_has_mep': dxf_has_mep,
+            'dxf_has_dimensions': dxf_has_dimensions,
+            'pdf_has_scope': pdf_has_scope
         }
     
     def build_file_analysis_response(
@@ -126,6 +133,11 @@ class ResponseBuilder:
         # 4. Additional Files (PDF, TXT)
         if file_analysis.get('pdf_analysis') or file_analysis.get('txt_analysis'):
             sections.append(self._build_other_files_summary(file_analysis))
+        
+        # 4.5. DETAILED FILE DESCRIPTIONS (Phase 1 Enhancement)
+        file_descriptions = self._build_detailed_file_descriptions(file_analysis)
+        if file_descriptions:
+            sections.append(file_descriptions)
         
         # 5. Data Quality Assessment
         sections.append(self._build_data_quality(gap_analysis, cross_reference))
@@ -678,6 +690,120 @@ class ResponseBuilder:
         
         return "\n".join(lines)
     
+    def _build_detailed_file_descriptions(self, file_analysis: Dict[str, Any]) -> str:
+        """
+        Build detailed descriptions of uploaded files
+        PHASE 1: This is what users see immediately after upload
+        """
+        if not file_analysis:
+            return ""
+    
+        lines = []
+        lines.append("## 📄 DESCRIERE DETALIATĂ FIȘIERE\n")
+    
+        # DXF Description
+        dxf_data = file_analysis.get('dxf_analysis', {})
+        if dxf_data.get('dxf_analysis'):
+            dxf_inner = dxf_data.get('dxf_analysis', {})
+        
+            lines.append("### 🏗️ Plan Tehnic DXF\n")
+        
+            # Basic info
+            total_area = dxf_inner.get('total_area', 0)
+            total_rooms = dxf_inner.get('total_rooms', 0)
+        
+            if total_area > 0:
+                lines.append(f"**Suprafață totală detectată:** {total_area:.2f} mp")
+            if total_rooms > 0:
+                lines.append(f"**Număr spații identificate:** {total_rooms}")
+        
+            # Room breakdown
+            room_breakdown = dxf_inner.get('room_breakdown', [])
+            if room_breakdown:
+                lines.append(f"\n**Detalii spații ({len(room_breakdown)} spații):**")
+                for room in room_breakdown[:10]:  # Show first 10
+                    room_name = room.get('romanian_name') or room.get('room_type', 'Unknown')
+                    room_area = room.get('area', 0)
+                    if room_area > 0:
+                        lines.append(f"  • {room_name}: {room_area:.1f} mp")
+            
+                if len(room_breakdown) > 10:
+                    lines.append(f"  • ... și încă {len(room_breakdown) - 10} spații")
+        
+            # MEP Systems
+            has_hvac = dxf_inner.get('has_hvac', False)
+            has_electrical = dxf_inner.get('has_electrical', False)
+        
+            if has_hvac or has_electrical:
+                lines.append("\n**Sisteme instalații detectate:**")
+            
+                if has_hvac:
+                    hvac_count = len(dxf_inner.get('hvac_inventory', []))
+                    lines.append(f"  • HVAC: {hvac_count} unități")
+            
+                if has_electrical:
+                    electrical_count = len(dxf_inner.get('electrical_inventory', []))
+                    lines.append(f"  • Instalații electrice: {electrical_count} componente")
+        
+            # Wall types
+            wall_types = dxf_inner.get('wall_types', [])
+            if wall_types:
+                lines.append(f"\n**Tipuri pereți:** {len(wall_types)} tipuri detectate")
+        
+            # Dimensions
+            if dxf_inner.get('has_dimensions'):
+                lines.append("\n✓ **Plan cotat** - dimensiuni disponibile pentru calcule precise")
+            else:
+                lines.append("\n⚠️ **Plan necotat** - recomandăm măsurători suplimentare")
+    
+        # PDF Description
+        pdf_data = file_analysis.get('pdf_analysis', {})
+        if pdf_data:
+            lines.append("\n### 📋 Document PDF - Cerințe/Specificații\n")
+        
+            page_count = pdf_data.get('page_count', 0)
+            if page_count > 0:
+                lines.append(f"**Număr pagini:** {page_count}")
+        
+            # Construction specs
+            construction_specs = pdf_data.get('construction_specs', [])
+            if construction_specs:
+                lines.append(f"\n**Specificații tehnice identificate ({len(construction_specs)}):**")
+                for spec in construction_specs[:5]:
+                    lines.append(f"  • {spec}")
+            
+                if len(construction_specs) > 5:
+                    lines.append(f"  • ... și încă {len(construction_specs) - 5} specificații")
+        
+            # Materials
+            materials = pdf_data.get('material_references', [])
+            if materials:
+                lines.append(f"\n**Materiale menționate ({len(materials)}):**")
+                for mat in materials[:5]:
+                    lines.append(f"  • {mat}")
+            
+                if len(materials) > 5:
+                    lines.append(f"  • ... și încă {len(materials) - 5} materiale")
+    
+        # TXT Description
+        txt_data = file_analysis.get('txt_analysis', {})
+        if txt_data:
+            lines.append("\n### 📝 Document Text - Cerințe Cliente\n")
+        
+            requirements = txt_data.get('requirements', [])
+            if requirements:
+                lines.append(f"**Cerințe identificate ({len(requirements)}):**")
+                for req in requirements[:5]:
+                    lines.append(f"  • {req}")
+            
+                if len(requirements) > 5:
+                    lines.append(f"  • ... și încă {len(requirements) - 5} cerințe")
+    
+        if len(lines) > 1:  # If we have content beyond the header
+            return "\n".join(lines)
+        else:
+            return ""
+
     def _build_data_quality(
         self,
         gap_analysis: Any,
@@ -927,7 +1053,6 @@ class ResponseBuilder:
             lines.append("✗ Nu am găsit specificații despre finisaje și materiale\n")
             lines.append("**Recomandare:** Adăugați informații despre:")
             lines.append("  • Nivel finisaje dorit")
-            lines.append("  • Buget estimat")
             lines.append("  • Timeline lucrări")
     
         # PDF/Spec only
@@ -944,10 +1069,8 @@ class ResponseBuilder:
             critical_gaps = gap_analysis.critical_gaps if gap_analysis else []
             gap_names = [g.field_name for g in critical_gaps]
         
-            if 'budget_range' in gap_names:
-                lines.append("✓ Am desenul și specificațiile complete")
-                lines.append("✗ Lipsește bugetul estimat pentru adaptarea soluțiilor\n")
-            elif 'finish_level' in gap_names:
+            # ✅ REMOVED: Budget gap message - customers don't have budgets
+            if 'finish_level' in gap_names:
                 lines.append("✓ Am desenul și specificațiile de bază")
                 lines.append("✗ Lipsește nivelul de finisaje dorit\n")
     

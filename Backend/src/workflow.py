@@ -51,7 +51,7 @@ async def run_complete_workflow(
         else:
             next_questions = [
                 "Aveți preferințe pentru materiale?",
-                "Care este bugetul aproximativ?"
+                "Ce nivel de finisaje doriți (economic/standard/premium)?"
             ]
         
         return {

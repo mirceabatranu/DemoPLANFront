@@ -42,6 +42,9 @@ class DataGap:
     examples: List[str] = field(default_factory=list)
     context_hint: Optional[str] = None  # Additional context for the question
     
+    # NEW: Add expected type for validation
+    expected_type: type = str  # Default to string
+    
     def format_question(self, context: Optional[Dict[str, Any]] = None) -> str:
         """Format question with context and examples"""
         question = f"**{self.display_name_ro}**: {self.question_template_ro}"
@@ -98,218 +101,74 @@ class GapAnalyzer:
         
     def _define_offer_requirements(self) -> Dict[str, DataGap]:
         """
-        Define what data is needed for offer generation
-        Based on Romanian construction practice and typical RFPs
+        SIMPLIFIED: Define only UNIVERSAL critical requirements.
+        Context-specific requirements are now handled by LLM prompts.
+        
+        Philosophy: These are the MINIMUM fields needed for ANY offer.
+        Everything else is context-dependent and asked by the agent intelligently.
         """
         return {
             # ============================================================
-            # CRITICAL - Must have for any offer (blocks generation)
+            # UNIVERSAL CRITICAL - Required for ALL projects
             # ============================================================
             'total_area': DataGap(
                 field_name='total_area',
                 display_name_ro='Suprafață totală',
                 priority=GapPriority.CRITICAL,
                 category=DataCategory.TECHNICAL,
-                question_template_ro='Confirmați suprafața exactă a spațiului pentru calculul cantităților?',
+                question_template_ro='Confirmați suprafața exactă a spațiului (în mp)?',
                 validation_rule='numeric > 0',
-                examples=['350.5 mp', '450 mp'],
-                context_hint='Necesară pentru estimarea materialelor și manoperei'
+                examples=['350.5 mp', '45 mp', '1200 mp'],
+                context_hint='Necesară pentru orice tip de estimare',
+                expected_type=float  # ✅ Indicate this should be numeric
+            ),
+            
+            'project_scope': DataGap(
+                field_name='project_scope',
+                display_name_ro='Scopul lucrărilor',
+                priority=GapPriority.CRITICAL,
+                category=DataCategory.TECHNICAL,
+                question_template_ro='Descrieți pe scurt ce lucrări doriți să realizați?',
+                validation_rule='text',
+                examples=['Vopsire 2 dormitoare', 'Renovare completă apartament', 'Fitout birou'],
+                context_hint='Definește tipul și amploarea proiectului'
             ),
             
             'budget_range': DataGap(
                 field_name='budget_range',
                 display_name_ro='Buget estimat',
-                priority=GapPriority.CRITICAL,
+                priority=GapPriority.LOW,  # ✅ LOW priority - customers typically don't have budgets
                 category=DataCategory.FINANCIAL,
-                question_template_ro='Care este bugetul estimat sau intervalul de preț acceptabil? (în EUR sau RON, fără TVA)',
-                validation_rule='numeric or range',
-                examples=['50.000 - 75.000 EUR', 'maxim 100.000 EUR', '200.000 - 250.000 RON'],
-                context_hint='Esențial pentru adaptarea soluțiilor tehnice la posibilitățile financiare'
+                question_template_ro='Dacă aveți un buget stabilit, vă rugăm să îl menționați (complet opțional)',
+                validation_rule='numeric or range or not_applicable',
+                examples=['5.000 EUR', '50.000 - 75.000 EUR', 'nu avem buget stabilit'],
+                context_hint='⚠️ NU întreba activ - acceptă doar dacă clientul oferă voluntar'
+            ),
+            
+            # ============================================================
+            # CONTEXT-DEPENDENT - Only asked if project complexity requires it
+            # These serve as fallbacks if LLM doesn't extract them
+            # ============================================================
+            'timeline': DataGap(
+                field_name='timeline',
+                display_name_ro='Termen de finalizare',
+                priority=GapPriority.HIGH,  # Demoted from CRITICAL
+                category=DataCategory.TIMELINE,
+                question_template_ro='Când doriți să fie finalizate lucrările?',
+                validation_rule='date or duration',
+                examples=['2 săptămâni', 'până în aprilie', 'cât mai repede'],
+                context_hint='Influențează programarea și resursele necesare'
             ),
             
             'finish_level': DataGap(
                 field_name='finish_level',
                 display_name_ro='Nivel finisaje',
-                priority=GapPriority.CRITICAL,
+                priority=GapPriority.HIGH,  # Demoted from CRITICAL
                 category=DataCategory.MATERIALS,
-                question_template_ro='Ce nivel de finisaje doriți pentru proiect?',
-                validation_rule='enum: standard, premium, luxury',
-                examples=['Standard (materiale românești)', 'Premium (branduri europene)', 'Luxury (top brands)'],
-                context_hint='Influențează direct costurile și calitatea finală'
-            ),
-            
-            'project_type': DataGap(
-                field_name='project_type',
-                display_name_ro='Tip proiect',
-                priority=GapPriority.CRITICAL,
-                category=DataCategory.TECHNICAL,
-                question_template_ro='Ce tip de proiect este? (renovare, amenajare spațiu gol, modernizare)',
-                validation_rule='enum',
-                examples=['Renovare completă', 'Amenajare spațiu shell&core', 'Modernizare parțială'],
-                context_hint='Determină volumul lucrărilor de demolare și pregătire'
-            ),
-            
-            # ============================================================
-            # HIGH PRIORITY - Significantly impacts accuracy
-            # ============================================================
-            'work_timeline': DataGap(
-                field_name='work_timeline',
-                display_name_ro='Timeline lucrări',
-                priority=GapPriority.HIGH,
-                category=DataCategory.TIMELINE,
-                question_template_ro='Care este perioada dorită de execuție? (dată start și dată finalizare)',
-                validation_rule='date_range',
-                examples=['11.10.2024 - 20.01.2025', '3 luni din momentul semnării', 'cât mai repede posibil'],
-                context_hint='Influențează organizarea echipelor și posibilele costuri suplimentare'
-            ),
-            
-            'hvac_requirements': DataGap(
-                field_name='hvac_requirements',
-                display_name_ro='Cerințe HVAC',
-                priority=GapPriority.HIGH,
-                category=DataCategory.TECHNICAL,
-                question_template_ro='Ce sistem de climatizare preferați? Aveți preferințe de brand?',
+                question_template_ro='Ce nivel de finisaje/calitate doriți?',
                 validation_rule='text',
-                examples=['Daikin VRV', 'Mitsubishi Electric', 'LG Multi-Split', 'fără preferință de brand'],
-                context_hint='Sistemul HVAC reprezintă 15-20% din costul total'
-            ),
-            
-            'electrical_requirements': DataGap(
-                field_name='electrical_requirements',
-                display_name_ro='Cerințe instalații electrice',
-                priority=GapPriority.HIGH,
-                category=DataCategory.TECHNICAL,
-                question_template_ro='Ce cerințe speciale aveți pentru instalațiile electrice?',
-                validation_rule='text',
-                examples=['Prize suplimentare pentru IT', 'Iluminat LED dimabil', 'Backup UPS pentru servere'],
-                context_hint='Modificările electrice necesită aprobare ISC'
-            ),
-            
-            'flooring_preferences': DataGap(
-                field_name='flooring_preferences',
-                display_name_ro='Preferințe pardoseli',
-                priority=GapPriority.HIGH,
-                category=DataCategory.MATERIALS,
-                question_template_ro='Ce tip de pardoseală doriți în spații?',
-                validation_rule='text',
-                examples=['Gresie 60x60', 'Parchet laminat', 'Vinyl LVT', 'Covor modular'],
-                context_hint='Pardoseala influențează confortul și costul de întreținere'
-            ),
-            
-            # ============================================================
-            # MEDIUM PRIORITY - Improves offer quality
-            # ============================================================
-            'ceiling_requirements': DataGap(
-                field_name='ceiling_requirements',
-                display_name_ro='Cerințe tavane',
-                priority=GapPriority.MEDIUM,
-                category=DataCategory.TECHNICAL,
-                question_template_ro='Ce tip de tavan doriți? (fals, liber aparent, combinat)',
-                validation_rule='text',
-                examples=['Tavan fals gips-carton', 'Tavan liber aparent industrial', 'Tavan modular Armstrong'],
-                context_hint='Tavanele false permit ascunderea instalațiilor dar reduc înălțimea utilă'
-            ),
-            
-            'partition_requirements': DataGap(
-                field_name='partition_requirements',
-                display_name_ro='Cerințe compartimentare',
-                priority=GapPriority.MEDIUM,
-                category=DataCategory.TECHNICAL,
-                question_template_ro='Ce tipuri de pereți doriți pentru compartimentare? (gips-carton, sticlă, mobile)',
-                validation_rule='text',
-                examples=['Gips-carton simplu', 'Pereți sticlă pentru săli meeting', 'Combinație gips + sticlă'],
-                context_hint='Pereții din sticlă sunt cu 40% mai scumpi dar dau transparență'
-            ),
-            
-            'door_window_specs': DataGap(
-                field_name='door_window_specs',
-                display_name_ro='Specificații uși și ferestre',
-                priority=GapPriority.MEDIUM,
-                category=DataCategory.MATERIALS,
-                question_template_ro='Aveți cerințe speciale pentru uși și ferestre? (tip, finisaj, hardware)',
-                validation_rule='text',
-                examples=['Uși lemn furnir natural', 'Uși MDF vopsite', 'Ferestre PVC cu geam termopan'],
-                context_hint='Hardware-ul calitativ (Häfele, Blum) crește durabilitatea'
-            ),
-            
-            'sanitary_requirements': DataGap(
-                field_name='sanitary_requirements',
-                display_name_ro='Cerințe instalații sanitare',
-                priority=GapPriority.MEDIUM,
-                category=DataCategory.TECHNICAL,
-                question_template_ro='Ce modificări doriți la instalațiile sanitare? (obiecte sanitare noi, relocări)',
-                validation_rule='text',
-                examples=['Înlocuire completă obiecte sanitare', 'Doar modernizare robinete', 'Fără modificări'],
-                context_hint='Lucrările sanitare necesită aprobare ISC dacă sunt relocări'
-            ),
-            
-            'acoustic_requirements': DataGap(
-                field_name='acoustic_requirements',
-                display_name_ro='Cerințe izolare fonică',
-                priority=GapPriority.MEDIUM,
-                category=DataCategory.TECHNICAL,
-                question_template_ro='Aveți cerințe speciale pentru izolarea fonică? (săli meeting, open-space)',
-                validation_rule='text',
-                examples=['Izolație fonică ridicată pentru săli meeting', 'Panouri acustice în open-space', 'Standard'],
-                context_hint='Izolația fonică corectă este esențială pentru productivitate'
-            ),
-            
-            'paint_finishes': DataGap(
-                field_name='paint_finishes',
-                display_name_ro='Vopsea și finisaje pereți',
-                priority=GapPriority.MEDIUM,
-                category=DataCategory.MATERIALS,
-                question_template_ro='Ce vopsea/finisaje doriți pentru pereți? (lavabilă, standard, tapet)',
-                validation_rule='text',
-                examples=['Vopsea lavabilă Dulux', 'Tapet texturat în zonele reprezentative', 'Vopsea standard albă'],
-                context_hint='Vopseaua lavabilă premium costă cu 30% mai mult dar durează dublu'
-            ),
-            
-            # ============================================================
-            # LOW PRIORITY - Nice to have
-            # ============================================================
-            'branding_requirements': DataGap(
-                field_name='branding_requirements',
-                display_name_ro='Cerințe branding',
-                priority=GapPriority.LOW,
-                category=DataCategory.CLIENT,
-                question_template_ro='Există cerințe de branding corporate pentru spațiu? (logo, culori specifice)',
-                validation_rule='text',
-                examples=['Logo recepție + culorile companiei', 'Branding discret', 'Fără cerințe speciale'],
-                context_hint='Elementele de branding se pot adăuga în etapa finală'
-            ),
-            
-            'furniture_preferences': DataGap(
-                field_name='furniture_preferences',
-                display_name_ro='Preferințe mobilier',
-                priority=GapPriority.LOW,
-                category=DataCategory.MATERIALS,
-                question_template_ro='Aveți preferințe pentru mobilier? (stil, brand, buget separat)',
-                validation_rule='text',
-                examples=['Mobilier modern minimalist', 'IKEA Business', 'Mobilier custom la comandă'],
-                context_hint='Mobilierul poate fi achiziționat separat dacă preferați'
-            ),
-            
-            'technology_integration': DataGap(
-                field_name='technology_integration',
-                display_name_ro='Integrare tehnologie',
-                priority=GapPriority.LOW,
-                category=DataCategory.TECHNICAL,
-                question_template_ro='Doriți integrare cu sisteme smart? (control iluminat, acces, climatizare)',
-                validation_rule='text',
-                examples=['Sistem BMS pentru climatizare', 'Control iluminat prin senzori', 'Fără automatizări'],
-                context_hint='Sistemele smart cresc confortul dar adaugă 5-10% la cost'
-            ),
-            
-            'sustainability_goals': DataGap(
-                field_name='sustainability_goals',
-                display_name_ro='Obiective sustenabilitate',
-                priority=GapPriority.LOW,
-                category=DataCategory.COMPLIANCE,
-                question_template_ro='Aveți obiective de sustenabilitate? (certificări, materiale eco)',
-                validation_rule='text',
-                examples=['Certificare LEED', 'Materiale cu certificat FSC', 'Fără cerințe speciale'],
-                context_hint='Certificările green pot fi un avantaj competitiv'
+                examples=['Standard', 'Calitate medie', 'Premium', 'Buget limitat'],
+                context_hint='Determină alegerea materialelor și costurile'
             ),
         }
     
@@ -318,7 +177,8 @@ class GapAnalyzer:
         dxf_data: Optional[Dict[str, Any]] = None,
         rfp_data: Optional[Dict[str, Any]] = None,
         user_requirements: Optional[Dict[str, Any]] = None,
-        conversation_context: Optional[List[Dict[str, Any]]] = None
+        conversation_context: Optional[List[Dict[str, Any]]] = None,
+        project_complexity: str = "medium"  # NEW PARAMETER
     ) -> GapAnalysisResult:
         """
         Comprehensive gap analysis across all data sources
@@ -357,7 +217,7 @@ class GapAnalyzer:
         confidence = self._calculate_confidence(available_data, gaps)
         
         # Step 5: Determine if can generate offer
-        can_generate = self._can_generate_offer(critical_gaps, confidence)
+        can_generate = self._can_generate_offer(critical_gaps, confidence, project_complexity)
         
         # Step 6: Generate prioritized questions
         # PHASE 2: Try LLM-powered questions first, fallback to templates
@@ -400,6 +260,33 @@ class GapAnalyzer:
         
         return result
     
+    def _safe_numeric_value(self, value: Any) -> Optional[float]:
+        """
+        Safely convert a value to numeric, handling strings and None.
+        Returns None if conversion fails.
+        """
+        if value is None:
+            return None
+        
+        if isinstance(value, (int, float)):
+            return float(value)
+        
+        if isinstance(value, str):
+            # Remove common text from numbers
+            cleaned = value.strip()
+            # Remove units like "mp", "m²", "EUR", "RON"
+            cleaned = cleaned.replace('mp', '').replace('m²', '').replace('m2', '')
+            cleaned = cleaned.replace('EUR', '').replace('RON', '').replace('€', '')
+            cleaned = cleaned.strip()
+            
+            # Try to convert
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
+        
+        return None
+    
     def _inventory_available_data(
         self,
         dxf_data: Optional[Dict],
@@ -419,7 +306,10 @@ class GapAnalyzer:
             dxf_analysis = dxf_data.get('dxf_analysis', {})
             
             if dxf_analysis.get('total_area'):
-                inventory['total_area'] = dxf_analysis['total_area']
+                # ✅ Convert to numeric safely
+                numeric_area = self._safe_numeric_value(dxf_analysis['total_area'])
+                if numeric_area:
+                    inventory['total_area'] = numeric_area
             
             if dxf_analysis.get('total_rooms'):
                 inventory['total_rooms'] = dxf_analysis['total_rooms']
@@ -463,7 +353,13 @@ class GapAnalyzer:
         if user_req:
             for key, value in user_req.items():
                 if value and key not in inventory:
-                    inventory[key] = value
+                    # ✅ Convert to numeric safely for total_area
+                    if key == 'total_area':
+                        numeric_area = self._safe_numeric_value(value)
+                        if numeric_area:
+                            inventory[key] = numeric_area
+                    else:
+                        inventory[key] = value
         
         # From conversation
         if conversation:
@@ -492,6 +388,10 @@ class GapAnalyzer:
             
             if value is None:
                 is_missing = True
+            # ✅ NEW: Treat "not_applicable" as VALID (not missing)
+            elif isinstance(value, str) and value.lower() in ['not_applicable', 'n/a', 'nu există', 'nu avem', 'nu exista']:
+                is_missing = False  # User explicitly said they don't have this
+                logger.info(f"✅ Field '{field_name}' marked as not applicable by user")
             elif isinstance(value, str) and len(value.strip()) == 0:
                 is_missing = True
             elif isinstance(value, (int, float)) and value == 0:
@@ -543,23 +443,43 @@ class GapAnalyzer:
         
         return confidence
     
-    def _can_generate_offer(self, critical_gaps: List[DataGap], confidence: float) -> bool:
+    def _can_generate_offer(self, critical_gaps: List[DataGap], confidence: float, project_complexity: str = "medium") -> bool:
         """
-        Determine if offer can be generated
+        Determine if offer can be generated based on DYNAMIC thresholds.
         
-        Rules:
-        - NO critical gaps allowed
-        - Confidence must be >= 75%
+        NEW: Complexity-aware thresholds
+        - micro: 40% confidence, 1 critical gap allowed (can estimate)
+        - simple: 55% confidence, 1 critical gap allowed
+        - medium: 70% confidence, 0 critical gaps
+        - complex: 85% confidence, 0 critical gaps
+        
+        Args:
+            critical_gaps: List of critical missing data
+            confidence: Overall confidence score
+            project_complexity: From complexity classifier (micro/simple/medium/complex)
         """
-        if len(critical_gaps) > 0:
-            logger.info(f"❌ Cannot generate offer: {len(critical_gaps)} critical gaps remain")
+        
+        # Define thresholds by complexity
+        thresholds = {
+            "micro": {"confidence": 0.40, "max_critical_gaps": 1},
+            "simple": {"confidence": 0.55, "max_critical_gaps": 1},
+            "medium": {"confidence": 0.70, "max_critical_gaps": 0},
+            "complex": {"confidence": 0.85, "max_critical_gaps": 0}
+        }
+        
+        threshold = thresholds.get(project_complexity, thresholds["medium"])
+        
+        # Check critical gaps
+        if len(critical_gaps) > threshold["max_critical_gaps"]:
+            logger.info(f"❌ Cannot generate offer: {len(critical_gaps)} critical gaps (max allowed: {threshold['max_critical_gaps']} for {project_complexity} project)")
             return False
         
-        if confidence < self.confidence_threshold:
-            logger.info(f"❌ Cannot generate offer: confidence {confidence:.1%} < {self.confidence_threshold:.1%}")
+        # Check confidence threshold
+        if confidence < threshold["confidence"]:
+            logger.info(f"❌ Cannot generate offer: confidence {confidence:.1%} < {threshold['confidence']:.1%} (threshold for {project_complexity} project)")
             return False
         
-        logger.info(f"✅ Can generate offer: no critical gaps, confidence {confidence:.1%}")
+        logger.info(f"✅ Can generate offer: {len(critical_gaps)} gaps, {confidence:.1%} confidence ({project_complexity} project)")
         return True
     
     # ============================================================================
@@ -642,10 +562,10 @@ REGULI OBLIGATORII:
 EXEMPLE BUNE:
 - "Am vazut in plan ca aveti 5 camere. Ce nivel de finisaje doriti pentru fiecare? (standard/premium/luxury)"
 - "Specificatiile mentioneaza sistem VRV. Aveti preferinta pentru brand? (Daikin, Mitsubishi, etc.)"
-- "Planul arata 120mp. Care este bugetul estimat pentru aceasta suprafata?"
+- "Planul arata 120mp cu 4 bai. Doriti faianta si gresie premium sau standard?"
 
 EXEMPLE RELE (prea generice, evita-le):
-- "Ce buget aveti?" (fara context)
+- "Ce buget aveti?" (NU cere buget - clientii nu au)
 - "Cand doriti sa inceapa lucrarile?" (fara legatura cu fisiere)
 
 Raspunde DOAR cu intrebarile, cate una per linie, fara numerotare:"""
@@ -734,30 +654,20 @@ Raspunde DOAR cu intrebarile, cate una per linie, fara numerotare:"""
         available_data: Dict[str, Any]
     ) -> List[str]:
         """
-        Generate maximum 5 prioritized questions (template-based fallback)
+        SIMPLIFIED: Generate questions for critical gaps only.
+        Context-specific questions now come from LLM prompts.
         
-        Priority order:
-        1. All CRITICAL gaps (these block offer)
-        2. HIGH priority gaps (up to remaining slots)
-        3. MEDIUM priority gaps (if slots remain)
+        Maximum 3 questions from gap analyzer.
+        Agent will ask additional context-specific questions via LLM.
         """
         questions = []
-        max_questions = 5
         
-        # Always include ALL critical gaps
-        for gap in critical:
-            questions.append(gap.format_question(available_data))
+        # Only ask about CRITICAL gaps (universal requirements)
+        for gap in critical[:3]:  # Max 3 critical questions
+            questions.append(gap.question_template_ro)
         
-        # Add HIGH priority until we reach max
-        remaining_slots = max_questions - len(questions)
-        for gap in high[:remaining_slots]:
-            questions.append(gap.format_question(available_data))
-        
-        # Add MEDIUM priority if still have slots
-        remaining_slots = max_questions - len(questions)
-        if remaining_slots > 0:
-            for gap in medium[:remaining_slots]:
-                questions.append(gap.format_question(available_data))
+        logger.info(f"📝 Gap analyzer generated {len(questions)} universal questions")
+        logger.info(f"💡 Agent will generate additional context-specific questions via LLM")
         
         return questions
     
@@ -847,52 +757,53 @@ Raspunde DOAR cu intrebarile, cate una per linie, fara numerotare:"""
         return summary
     
     def _generate_recommendations(self, gaps: List[DataGap], available_data: Dict[str, Any]) -> List[str]:
-        """Generate recommendations based on gaps and available data"""
+        """Generate actionable recommendations"""
         recommendations = []
         
-        # Check for critical gaps
-        critical = [g for g in gaps if g.priority == GapPriority.CRITICAL]
-        if critical:
+        # Get total area safely (handle both string and numeric)
+        total_area_raw = available_data.get('total_area', 0)
+        try:
+            total_area = float(total_area_raw) if total_area_raw else 0
+        except (ValueError, TypeError):
+            total_area = 0
+        
+        # Get budget safely
+        budget_raw = available_data.get('budget_range', '')
+        budget_str = str(budget_raw) if budget_raw else ''
+        
+        # Recommendation 1: For large projects
+        if total_area > 200:
             recommendations.append(
-                f"Completati urgent {len(critical)} informatii critice pentru generarea ofertei"
+                "Proiect mare (>200mp) - Recomandăm planificare detaliată pe faze"
             )
         
-        # Check for high priority gaps
-        high = [g for g in gaps if g.priority == GapPriority.HIGH]
-        if high:
+        # ✅ REMOVED: Budget recommendation - customers typically don't have budgets
+        
+        # Recommendation 2: Timeline not specified
+        if not available_data.get('timeline'):
             recommendations.append(
-                f"Furnizati {len(high)} informatii cu prioritate inalta pentru acuratete sporita"
+                "Specificarea termenului ajută la alocarea optimă a resurselor"
             )
         
-        # Specific recommendations based on available data
-        if not available_data.get('has_dimensions') and available_data.get('total_area'):
+        # Recommendation 4: Multiple critical gaps
+        critical_gap_count = len([g for g in gaps if g.priority == GapPriority.CRITICAL])
+        if critical_gap_count >= 2:
             recommendations.append(
-                "Plan fara cote - recomandam vizita tehnica pentru masuratori precise"
+                f"Completarea celor {critical_gap_count} informații critice va permite generarea ofertei"
             )
         
-        if available_data.get('total_area', 0) > 200:
+        # Recommendation 5: For complex projects
+        finish_level = available_data.get('finish_level', '')
+        if finish_level and 'premium' in str(finish_level).lower():
             recommendations.append(
-                "Suprafata mare - recomandam planificare in etape pentru optimizare costuri"
+                "Nivel premium detectat - Recomandăm specificații detaliate materiale"
             )
         
-        if not available_data.get('work_timeline'):
+        # Recommendation 6: Site conditions matter for execution
+        if not available_data.get('site_conditions') and total_area > 100:
             recommendations.append(
-                "Stabiliti un timeline clar pentru planificare echipe si materiale"
+                "Pentru proiecte >100mp, condițiile șantierului influențează semnificativ execuția"
             )
-        
-        if not available_data.get('budget_range'):
-            recommendations.append(
-                "Un buget estimativ ajuta la personalizarea solutiilor tehnice"
-            )
-        
-        # Timeline recommendations
-        timeline = available_data.get('work_timeline')
-        if timeline and isinstance(timeline, dict):
-            duration = timeline.get('duration_days', 0)
-            if duration < 30:
-                recommendations.append(
-                    "Timeline foarte strans - posibile costuri suplimentare pentru urgenta"
-                )
         
         return recommendations
 

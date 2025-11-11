@@ -35,6 +35,10 @@ from src.intelligence.cross_reference_engine import (
     ConflictSeverity,
     ConflictType
 )
+
+# NEW IMPORTS - Add these lines
+from src.intelligence.complexity_classifier import ComplexityClassifier, ProjectComplexity
+from src.prompts.system_prompts import SystemPrompts
 # Add to imports at the top:
 from src.services.response_builder import (
     ResponseBuilder,
@@ -95,6 +99,9 @@ class AgentContext:
     analysis_results: Dict[str, Any] = field(default_factory=dict)
     missing_data: List[str] = field(default_factory=list)
     romanian_context: Dict[str, Any] = field(default_factory=dict)
+    
+    # NEW: Track project complexity tier
+    project_complexity: str = "medium"  # Values: "micro", "simple", "medium", "complex"
 
 @dataclass
 class UnifiedResponse:
@@ -138,6 +145,13 @@ class UnifiedConstructionAgent:
         
         # ✅ ADD THIS - Response Builder
         self.response_builder = ResponseBuilder()
+        
+        # NEW INITIALIZATIONS - Add these lines
+        self.complexity_classifier = ComplexityClassifier()
+        logger.info("✅ Complexity classifier initialized")
+        
+        self.system_prompts = SystemPrompts()
+        logger.info("✅ System prompts loaded")
         
         logger.info("✅ Cross-Reference Engine initialized")
         logger.info("✅ Response Builder initialized")
@@ -368,6 +382,15 @@ class UnifiedConstructionAgent:
 
             processing_time = (time.time() - start_time) * 1000
             logger.info(f"✅ Conversation processed in {processing_time:.0f}ms")
+
+            # ✅ DEBUG LOGGING - See conversation state after processing
+            logger.info("="*80)
+            logger.info("🔍 DEBUG: Conversation State After Processing")
+            logger.info(f"Project Data: {context.project_data}")
+            logger.info(f"Confidence: {context.confidence_score}")
+            logger.info(f"Missing Data: {context.missing_data}")
+            logger.info(f"Can Generate Offer: {response.can_generate_offer}")
+            logger.info("="*80)
 
             response_dict = {
                 "session_id": context.session_id,
@@ -710,12 +733,16 @@ class UnifiedConstructionAgent:
             context = await self._load_session_context(session_id)
             context.current_mode = AgentMode.OFFER_GENERATION
 
+            # Use stored complexity for offer generation
+            complexity = context.project_complexity if hasattr(context, 'project_complexity') else "medium"
+
             # Perform gap analysis
             gap_result = await self.gap_analyzer.analyze_gaps(
                 dxf_data=context.analysis_results.get('dxf_analysis'),
                 rfp_data=context.analysis_results.get('rfp_data'),
                 user_requirements=context.project_data,
-                conversation_context=context.conversation_history
+                conversation_context=context.conversation_history,
+                project_complexity=complexity  # NEW PARAMETER
             )
             
             # ✅ ADD THIS - Perform cross-reference validation
@@ -1136,13 +1163,25 @@ class UnifiedConstructionAgent:
         
         start_time = time.time()
         
-        # ✅ STEP 1: Perform gap analysis
+        # Detect project complexity FIRST
+        logger.info("🎯 Detecting project complexity")
+        complexity = self.complexity_classifier.classify_project(
+            user_message=context.conversation_history[-1].get('content', '') if context.conversation_history else '',
+            files_uploaded=len(context.analysis_results.get('file_references', [])),
+            dxf_data=consolidated_analysis.get('file_analysis', {}).get('dxf_analysis'),
+            project_data=context.project_data
+        )
+        context.project_complexity = complexity.value
+        logger.info(f"🎯 Project complexity detected: {complexity.value}")
+        
+        # ✅ STEP 1: Perform gap analysis WITH complexity awareness
         logger.info("📊 Performing gap analysis")
         gap_result = await self.gap_analyzer.analyze_gaps(
             dxf_data=consolidated_analysis.get('file_analysis', {}).get('dxf_analysis'),
             rfp_data=consolidated_analysis.get('rfp_data'),
             user_requirements=context.project_data,
-            conversation_context=context.conversation_history
+            conversation_context=context.conversation_history,
+            project_complexity=context.project_complexity  # NEW PARAMETER
         )
         
         # ✅ STEP 2: Extract structured data for response builder
@@ -1195,6 +1234,21 @@ class UnifiedConstructionAgent:
 
     async def _analyze_user_message(self, message: str, context: AgentContext) -> Dict[str, Any]:
         """Analyze user message in conversation context using context-aware LLM."""
+    
+        # ✅ PHASE 1: Check for file description request
+        message_lower = message.lower()
+        if any(keyword in message_lower for keyword in [
+            'descriere', 'descrie', 'detalii fisier', 'ce contine',
+            'vreau descriere', 'fisierele atasate', 'ce am incarcat'
+        ]):
+            logger.info("🔍 Detected file description request")
+            return {
+                "message_type": "file_description_request",
+                "extracted_data": {},
+                "confidence_delta": 0.0,
+                "user_message": message,
+                "requires_file_description": True
+            }
         
         # Get files from context
         file_references = context.analysis_results.get("file_references", [])
@@ -1205,84 +1259,104 @@ class UnifiedConstructionAgent:
         # Build COMPLETE file list for LLM (no truncation)
         file_list_details = self._build_file_context_for_llm(context)
 
-        # ✅ SIMPLIFIED: Standard analysis without mode detection
-        analysis_prompt = f"""
-Ești un asistent inteligent care analizează mesajele utilizatorilor în contextul unui proiect de construcții.
-Extrage orice informație nouă furnizată de utilizator și actualizează starea proiectului.
-Răspunde DOAR cu un obiect JSON valid, fără text suplimentar sau formatare markdown.
+        # ✅ ENHANCED: Explicit extraction prompt
+        analysis_prompt = f"""Tu ești un analist expert care extrage informații structurate din mesajele utilizatorilor.
 
-Context proiect:
+**CONTEXT PROIECT EXISTENT:**
 {context_summary}
 
-Fișiere disponibile:
-{file_list_details}
+**FIȘIERE ÎNCĂRCATE:**
+{file_list_details if file_list_details else "Niciun fișier încărcat"}
 
-Analizează acest mesaj și extrage:
-1. Tip mesaj: "data_update" (furnizează date noi), "question" (pune întrebări), "general" (conversație)
-2. Date noi extrase: suprafață, camere, buget, cerințe, timeline
-3. Schimbare încredere: cât crește încrederea (0.0-1.0) datorită noilor informații
+**MESAJUL UTILIZATORULUI:**
+"{message}"
 
-Mesaj utilizator: {message}
+**TASK-UL TĂU:**
+Extrage TOATE informațiile noi din mesajul utilizatorului și returnează-le în format JSON.
 
-Răspunde cu JSON:
+**REGULI OBLIGATORII:**
+1. Dacă utilizatorul menționează suprafața (mp, metri pătrați), extrage-o ca număr
+2. Dacă menționează locația, extrage-o
+3. Dacă menționează timeline/termen, extrage-l
+4. Dacă spune "nu există", marchează ca "not_applicable"
+5. IMPORTANT: Dacă utilizatorul a furnizat deja această informație, NU o cere din nou!
+6. NU întreba despre buget - clienții nu au buget stabilit
+
+**FORMAT JSON (OBLIGATORIU):**
 {{
-  "message_type": "data_update|question|general",
-  "extracted_data": {{"area": null, "rooms": null, "budget": null, "requirements": null, "timeline": null}},
-  "confidence_delta": 0.0,
-  "user_message": "{message}",
-  "summary_of_update": "Scurtă descriere ce s-a extras"
+  "extracted_data": {{
+    "total_area": <număr sau null>,
+    "timeline": "<text sau 'not_applicable'>",
+    "project_scope": "<descriere scurtă>",
+    "finish_level": "<standard/premium/budget sau null>",
+    "location": "<oraș sau null>",
+    "site_conditions": "<text sau null>"
+  }},
+  "user_intent": "provide_info|ask_question|request_offer",
+  "confidence_in_extraction": <0-1>
 }}
-"""
-        
+
+**EXEMPLE:**
+
+User: "suprafata de 100 mp pereti si tavane"
+→ {{"extracted_data": {{"total_area": 100, "project_scope": "vopsire pereți și tavane"}}, "user_intent": "provide_info"}}
+
+User: "nu există"
+→ {{"extracted_data": {{}}, "user_intent": "provide_info"}}
+
+User: "București local"
+→ {{"extracted_data": {{"location": "București"}}, "user_intent": "provide_info"}}
+
+**RĂSPUNDE DOAR CU JSON, FĂRĂ TEXT SUPLIMENTAR:**"""
+
         try:
+            # Call LLM for analysis
             from src.services.llm_service import safe_construction_call
-            llm_response = await safe_construction_call(
+            analysis_response = await safe_construction_call(
                 user_input=analysis_prompt,
-                system_prompt="Ești un analist tehnic. Răspunzi DOAR cu JSON valid.",
-                temperature=0.1
+                temperature=0.1  # Low temperature for structured extraction
             )
             
-            # Parse LLM JSON response
-            llm_response_clean = llm_response.strip()
-            if llm_response_clean.startswith("```"):
-                llm_response_clean = llm_response_clean.split("```")[1]
-                if llm_response_clean.startswith("json"):
-                    llm_response_clean = llm_response_clean[4:]
+            # Parse JSON response
+            # Remove markdown code blocks if present
+            cleaned_response = analysis_response.strip()
+            if cleaned_response.startswith('```'):
+                cleaned_response = cleaned_response.split('```')[1]
+                if cleaned_response.startswith('json'):
+                    cleaned_response = cleaned_response[4:]
+            cleaned_response = cleaned_response.strip()
             
-            llm_analysis = json.loads(llm_response_clean)
+            message_analysis = json.loads(cleaned_response)
             
-            # Update context with extracted data
-            extracted = llm_analysis.get("extracted_data", {})
-            if extracted.get("area"):
-                context.project_data["total_area"] = extracted["area"]
-            if extracted.get("rooms"):
-                context.project_data["total_rooms"] = extracted["rooms"]
-            if extracted.get("budget"):
-                context.project_data["budget"] = extracted["budget"]
-            if extracted.get("requirements"):
-                current_reqs = context.romanian_context.get("user_requirements", "")
-                context.romanian_context["user_requirements"] = f"{current_reqs} {extracted['requirements']}".strip()
-            if extracted.get("timeline"):
-                context.project_data["timeline"] = extracted["timeline"]
+            # ✅ UPDATE context.project_data with extracted info
+            extracted = message_analysis.get('extracted_data', {})
+            for key, value in extracted.items():
+                if value and value != 'null' and value != 'not_applicable':
+                    context.project_data[key] = value
+                    logger.info(f"✅ Extracted {key}: {value}")
             
-            # Update confidence
-            confidence_delta = llm_analysis.get("confidence_delta", 0.0)
-            context.confidence_score = min(context.confidence_score + confidence_delta, 1.0)
+            # Log what was extracted
+            logger.info(f"📊 Message analysis result: {message_analysis.get('user_intent')}")
+            logger.info(f"📊 Updated project_data: {context.project_data}")
             
-            analysis = {
-                "message_type": llm_analysis.get("message_type", "general"),
-                "extracted_data": extracted,
-                "confidence_delta": confidence_delta,
-                "user_message": message,
-                "update_summary": llm_analysis.get("summary_of_update", "")
+            return message_analysis
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Failed to parse message analysis JSON: {e}")
+            logger.error(f"Raw response: {analysis_response}")
+            # Return safe default
+            return {
+                "extracted_data": {},
+                "user_intent": "provide_info",
+                "confidence_in_extraction": 0.5
             }
-            
-            logger.info(f"✅ Message analysis: {analysis['message_type']}, confidence Δ: +{confidence_delta:.2f}")
-            return analysis
-
-        except (json.JSONDecodeError, Exception) as e:
-            logger.error(f"❌ LLM-based message analysis failed: {e}. Falling back to basic analysis.")
-            return await self._fallback_analyze_user_message(message, context)
+        except Exception as e:
+            logger.error(f"❌ Message analysis failed: {e}")
+            return {
+                "extracted_data": {},
+                "user_intent": "provide_info",
+                "confidence_in_extraction": 0.0
+            }
 
     async def _fallback_analyze_user_message(self, message: str, context: AgentContext) -> Dict[str, Any]:
         """Fallback method to analyze user message with regex if LLM fails."""
@@ -1304,12 +1378,7 @@ Răspunde cu JSON:
             analysis["extracted_data"]["rooms"] = rooms_match
             analysis["confidence_delta"] += 0.10
             analysis["message_type"] = "data_update"
-        # Look for budget information
-        budget_match = self._extract_budget_from_text(message)
-        if budget_match:
-            context.project_data["budget"] = budget_match
-            analysis["extracted_data"]["budget"] = budget_match
-            analysis["confidence_delta"] += 0.05
+        # ✅ REMOVED: Budget extraction - customers don't have budgets
         # Update context confidence
         context.confidence_score = min(context.confidence_score + analysis["confidence_delta"], 1.0)
         return analysis
@@ -1325,6 +1394,31 @@ Răspunde cu JSON:
         initial_confidence = context.confidence_score
         initial_gaps = len(context.missing_data)
         
+         # ✅ PHASE 1: Handle file description requests specially
+        if message_analysis.get("requires_file_description"):
+            logger.info("📄 Generating detailed file descriptions")
+        
+        # Build detailed file description from loaded analysis
+            file_analysis = context.analysis_results.get("file_analysis", {})
+            file_description = self.response_builder._build_detailed_file_descriptions(file_analysis)
+        
+            if file_description:
+                return UnifiedResponse(
+                content=f"Iată descrierea detaliată a fișierelor încărcate:\n\n{file_description}",
+                confidence=context.confidence_score,
+                mode=context.current_mode,
+                next_questions=[],
+                can_generate_offer=False
+            )
+            else:
+                return UnifiedResponse(
+                content="Nu am găsit fișiere analizate în această sesiune. Vă rugăm să încărcați fișiere pentru analiză.",
+                confidence=0.0,
+                mode=context.current_mode,
+                next_questions=[],
+                can_generate_offer=False
+            )
+        
         # Build conversation prompt
         system_prompt = self._build_conversation_prompt(message_analysis, context)
         user_message = message_analysis.get("user_message", "")
@@ -1337,13 +1431,26 @@ Răspunde cu JSON:
             temperature=0.3
         )
         
-        # ✅ PERFORM GAP ANALYSIS AFTER USER RESPONSE
+        # Ensure complexity is set (detect if needed)
+        if not hasattr(context, 'project_complexity') or not context.project_complexity:
+            logger.info("🎯 Detecting project complexity during conversation")
+            complexity = self.complexity_classifier.classify_project(
+                user_message=user_message,
+                files_uploaded=len(context.analysis_results.get('file_references', [])),
+                dxf_data=context.analysis_results.get('file_analysis', {}).get('dxf_analysis'),
+                project_data=context.project_data
+            )
+            context.project_complexity = complexity.value
+            logger.info(f"🎯 Project complexity: {context.project_complexity}")
+        
+        # ✅ PERFORM GAP ANALYSIS AFTER USER RESPONSE (with complexity)
         logger.info("🔍 Analyzing gaps after user response")
         gap_result = await self.gap_analyzer.analyze_gaps(
             dxf_data=context.analysis_results.get('file_analysis', {}).get('dxf_analysis'),
             rfp_data=context.analysis_results.get('rfp_data'),
             user_requirements=context.project_data,
-            conversation_context=context.conversation_history
+            conversation_context=context.conversation_history,
+            project_complexity=context.project_complexity  # NEW PARAMETER
         )
         
         # Update context
@@ -1391,93 +1498,107 @@ Răspunde cu JSON:
             can_generate_offer=gap_result.can_generate_offer
         )
 
+    def _build_missing_data_summary(self, context: AgentContext) -> str:
+        """
+        Build a summary of what information is still needed.
+        Used by LLM to ask intelligent questions.
+        """
+        if not context.missing_data:
+            return "✅ Toate informațiile esențiale sunt disponibile."
+        
+        missing_summary = "📋 Informații ce ar îmbunătăți acuratețea ofertei:\n"
+        for idx, missing_item in enumerate(context.missing_data[:5], 1):  # Max 5
+            missing_summary += f"{idx}. {missing_item}\n"
+        
+        return missing_summary
+
     def _build_conversation_prompt(self, message_analysis: Dict[str, Any], context: AgentContext) -> str:
-        """Builds the system prompt for the conversation LLM call."""
-        # ✅ Build comprehensive project summary with FILE DETAILS
+        """
+        NEW: Build context-aware system prompt using complexity tier.
+        Prompts are now dynamic and adapt to project complexity.
+        """
+        
+        # Detect project complexity if not already set
+        if not hasattr(context, 'project_complexity') or not context.project_complexity:
+            complexity = self.complexity_classifier.classify_project(
+                user_message=context.conversation_history[-1].get('content', '') if context.conversation_history else '',
+                files_uploaded=len(context.analysis_results.get('file_references', [])),
+                dxf_data=context.analysis_results.get('file_analysis', {}).get('dxf_analysis'),
+                project_data=context.project_data
+            )
+            context.project_complexity = complexity.value
+        else:
+            # Use stored complexity as enum
+            complexity = ProjectComplexity(context.project_complexity)
+        
+        logger.info(f"🎯 Project complexity for prompt: {complexity.value}")
+        
+        # Build comprehensive project summary
         project_summary = self._build_detailed_project_summary(context)
         
-        # ✅ Build COMPLETE file context for LLM
+        # Build complete file context
         file_context = self._build_file_context_for_llm(context)
-
-        # ✅ ENHANCED: System prompt ALWAYS demands exhaustive detail
-        return f"""Tu ești un consultant tehnic de construcții specializat în proiecte comerciale/birouri interioare.
-
-REGULI OBLIGATORII PENTRU RĂSPUNSURI:
-1. ÎNTOTDEAUNA furnizezi descrieri tehnice COMPLETE și EXHAUSTIVE
-2. NICIODATĂ nu rezumi sau omit detalii
-3. NICIODATĂ nu spui "și altele" - listezi TOT ce ai găsit
-4. Pentru fiecare întrebare, verifici TOATE datele disponibile
-
-CONTEXT PROIECT ACTUAL:
-{project_summary}
-
-FIȘIERE ANALIZATE (date complete):
-{file_context}
-
-STARE PROIECT:
-- Încredere actuală: {context.confidence_score:.1%}
-- Date lipsă: {', '.join(context.missing_data) if context.missing_data else 'Niciuna'}
-
-INSTRUCȚIUNI SPECIFICE PENTRU RĂSPUNSURI:
-
-Pentru fiecare fișier DXF:
-- Listează TOATE camerele cu suprafețe exacte și dimensiuni (lungime × lățime)
-- Numără și detaliază TOATE componentele MEP:
-  * Prize și întrerupătoare (locații și tipuri)
-  * Unități HVAC (capacități, poziționate)
-  * Corpuri de iluminat (tipuri, cantități)
-  * Instalații sanitare (dacă aplicabil)
-- Specifică TOATE tipurile de pereți cu lungimi totale și grosimi
-- Enumeră TOATE materialele identificate cu specificații complete
-- Detaliază feronere și uși (dimensiuni, tipuri, materiale)
-- Descrie tipuri pardoseli și suprafețe
-- Menționează înălțimi tavane unde sunt disponibile
-
-Pentru fiecare fișier PDF:
-- Extrage și listează TOATE specificațiile tehnice
-- Prezintă TOATE cerințele reglementare identificate
-- Detaliază informații cost și timeline dacă există
-- Listează TOATE materialele menționate cu specificații
-
-Pentru fiecare fișier TXT:
-- Enumeră TOATE cerințele clientului
-- Detaliază TOATE preferințele menționate
-- Listează TOATE cuvintele cheie relevante pentru construcție
-
-La SFÂRȘITUL fiecărui răspuns, include ÎNTOTDEAUNA analiza completitudinii:
-
-**Analiza completitudinii pentru ofertă:**
-✅ Date disponibile: [listează EXACT ce avem]
-❌ Date lipsă pentru ofertă completă: [listează EXACT ce lipsește]
-📋 Următorii pași: [acțiuni specifice necesare]
-
-Răspunde în română, profesional, cu termeni tehnici corecți pentru construcții comerciale/birouri."""
+        
+        # Get missing data summary
+        missing_data_summary = self._build_missing_data_summary(context)
+        
+        # Get appropriate system prompt for complexity tier
+        system_prompt = self.system_prompts.get_conversation_prompt(
+            complexity=complexity,
+            project_summary=project_summary,
+            file_context=file_context,
+            missing_data=missing_data_summary,
+            confidence_score=context.confidence_score
+        )
+        
+        return system_prompt
 
     def _build_file_context_for_llm(self, context: AgentContext) -> str:
         """Build detailed file context with COMPLETE extracted analysis data - NO LIMITS"""
-        
-        # FIX: Correctly access file_references from within the 'file_analysis' dictionary
-        file_analysis = context.analysis_results.get("file_analysis", {})
-        file_references = file_analysis.get("file_references", [])
-        
-        if not file_references or len(file_references) == 0:
-            logger.warning("⚠️ No file references found in context!")
-            return "**Fișiere încărcate:** Niciun fișier detectat în context"
-        
-        logger.info(f"📋 Building COMPLETE file context for {len(file_references)} files (NO TRUNCATION)")
-        
-        file_context_parts = [f"**Fișiere încărcate și analizate:** {len(file_references)} fișiere\n"]
-        
-        for idx, file_ref in enumerate(file_references, 1):
-            filename = file_ref.get("filename", "unknown")
-            file_type = file_ref.get("content_type", "unknown")
-            file_size = file_ref.get("size", 0)
-            analysis_summary = file_ref.get("analysis_summary", {})
-            
+
+        # ✅ FIX: Try to get file_analyses_docs first (more complete data)
+        file_analyses_docs = context.analysis_results.get("file_analyses_docs", [])
+
+        if not file_analyses_docs:
+            # Fallback to file_references
+            file_analysis = context.analysis_results.get("file_analysis", {})
+            file_references = file_analysis.get("file_references", [])
+
+            if not file_references or len(file_references) == 0:
+                logger.warning("⚠️ No file data found in context!")
+                return "**Fișiere încărcate:** Niciun fișier detectat în context"
+
+            # Use file_references (less detailed)
+            files_to_process = file_references
+            logger.info(f"📋 Using file_references: {len(file_references)} files")
+            logger.info(f"📋 Building COMPLETE file context for {len(files_to_process)} files (NO TRUNCATION)")
+        else:
+            # Use file_analyses_docs (more detailed)
+            files_to_process = file_analyses_docs
+            logger.info(f"📋 Using file_analyses_docs: {len(file_analyses_docs)} files")
+            logger.info(f"📋 Building COMPLETE file context for {len(files_to_process)} files (NO TRUNCATION)")
+
+        file_context_parts = [f"**Fișiere încărcate și analizate:** {len(files_to_process)} fișiere\n"]
+
+        for idx, file_doc in enumerate(files_to_process, 1):
+            # ✅ Handle both file_references and file_analyses_docs structures
+            filename = file_doc.get("filename", "unknown")
+            file_type = file_doc.get("content_type", "unknown")
+            file_size = file_doc.get("size", 0)
+
+            # Get analysis data (structure differs between sources)
+            if "analysis_data" in file_doc:
+                # This is from file_analyses_docs (full document)
+                analysis_data = file_doc.get("analysis_data", {})
+                analysis_summary = analysis_data.get("analysis_summary", {})
+            else:
+                # This is from file_references (summary only)
+                analysis_summary = file_doc.get("analysis_summary", {})
+
             file_context_parts.append(f"\n{idx}. **{filename}**")
             file_context_parts.append(f"   - Tip: {file_type}")
             file_context_parts.append(f"   - Dimensiune: {file_size / 1024:.1f} KB")
-            
+
             # ✅ CRITICAL: Show COMPLETE data for DXF files (full spec_analysis + summary)
             if analysis_summary.get("type") == "dxf":
                 file_context_parts.append(f"   - Format: Plan tehnic DXF")
@@ -1485,13 +1606,13 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                 # ✅ DEBUG: Log data structure to understand what exists
                 logger.info("🔍 DXF Data Structure Check:")
                 logger.info(f"   - analysis_summary keys: {list(analysis_summary.keys())}")
-                
-                full_analysis_data = file_ref.get("analysis_data", {})
+
+                full_analysis_data = file_doc.get("analysis_data", {})
                 logger.info(f"   - analysis_data keys: {list(full_analysis_data.keys())}")
-                
+
                 dxf_analysis = full_analysis_data.get("dxf_analysis", {})
                 logger.info(f"   - dxf_analysis keys: {list(dxf_analysis.keys())}")
-                
+
                 spec_analysis = dxf_analysis.get("spec_analysis", {}) if isinstance(dxf_analysis, dict) else {}
                 if spec_analysis:
                     logger.info(f"   - spec_analysis keys: {list(spec_analysis.keys())}")
@@ -1505,11 +1626,11 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                 total_area = analysis_summary.get("total_area", 0)
                 if total_area > 0:
                     file_context_parts.append(f"   - **Suprafață totală: {total_area:.2f} mp**")
-                
+
                 total_rooms = analysis_summary.get("total_rooms", 0)
                 if total_rooms > 0:
                     file_context_parts.append(f"   - **Număr spații: {total_rooms}**")
-                
+
                 # ========================================================
                 # SECTION 2: ROOMS WITH DIMENSIONS (COMPLETE)
                 # ========================================================
@@ -1521,16 +1642,16 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                         romanian_name = room.get("romanian_name", room_name)
                         room_area = room.get("area", 0)
                         room_dims = room.get("dimensions", {})
-                        
+
                         # Show Romanian name (more natural for Romanian users)
                         room_detail = f"     • {romanian_name}: {room_area:.1f} mp"
-                        
+
                         # Add dimensions if available
                         if room_dims.get("length") and room_dims.get("width"):
                             room_detail += f" ({room_dims['length']:.1f}m × {room_dims['width']:.1f}m)"
-                        
+
                         file_context_parts.append(room_detail)
-                
+
                 # ========================================================
                 # SECTION 3: WALL TYPES (COMPLETE)
                 # ========================================================
@@ -1554,7 +1675,7 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                 finishes_count = spec_analysis.get("finishes_count", 0)
                 if finishes_count > 0:
                     file_context_parts.append(f"   - **Finisaje identificate: {finishes_count} finisaje**")
-                    
+
                     # Load finishes from specification_analysis
                     specification_data = spec_analysis.get("specification_analysis", {})
                     if specification_data:
@@ -1575,14 +1696,14 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                     for hvac in hvac_inventory:
                         hvac_type = hvac.get('type', 'Unknown')
                         hvac_desc = f"     • {hvac_type}"
-                        
+
                         if hvac.get('model'):
                             hvac_desc += f" - {hvac['model']}"
                         if hvac.get('capacity_kw'):
                             hvac_desc += f" ({hvac['capacity_kw']}kW)"
                         if hvac.get('room'):
                             hvac_desc += f" [Cameră: {hvac['room']}]"
-                        
+
                         file_context_parts.append(hvac_desc)
                 elif analysis_summary.get("has_hvac"):
                     file_context_parts.append(f"   - **Sistem HVAC:** Detectat (fără inventory detaliat)")
@@ -1593,12 +1714,12 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                 electrical_inventory = spec_analysis.get("electrical_inventory", [])
                 if electrical_inventory:
                     file_context_parts.append(f"   - **Inventar Instalații Electrice (TOATE {len(electrical_inventory)} componente):**")
-                    
+
                     # Group by component_type for better readability
                     outlets = [e for e in electrical_inventory if e.get('component_type') == 'outlet']
                     switches = [e for e in electrical_inventory if e.get('component_type') == 'switch']
                     lights = [e for e in electrical_inventory if e.get('component_type') == 'light_fixture']
-                    
+
                     # OUTLETS
                     if outlets:
                         total_outlets = sum(e.get('quantity', 1) for e in outlets)
@@ -1613,7 +1734,7 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                             file_context_parts.append(outlet_desc)
                         if len(outlets) > 10:
                             file_context_parts.append(f"       ... și {len(outlets) - 10} prize suplimentare")
-                    
+
                     # SWITCHES
                     if switches:
                         total_switches = sum(e.get('quantity', 1) for e in switches)
@@ -1625,7 +1746,7 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                             file_context_parts.append(switch_desc)
                         if len(switches) > 10:
                             file_context_parts.append(f"       ... și {len(switches) - 10} întrerupătoare suplimentare")
-                    
+
                     # LIGHTS
                     if lights:
                         total_lights = sum(e.get('quantity', 1) for e in lights)
@@ -1647,7 +1768,7 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                 if door_window_schedule:
                     doors = [dw for dw in door_window_schedule if dw.get('type') == 'door']
                     windows = [dw for dw in door_window_schedule if dw.get('type') == 'window']
-                    
+
                     if doors:
                         file_context_parts.append(f"   - **Uși (TOATE {len(doors)} bucăți):**")
                         for door in doors[:15]:
@@ -1662,7 +1783,7 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                                 file_context_parts.append(door_desc)
                         if len(doors) > 15:
                             file_context_parts.append(f"     ... și {len(doors) - 15} uși suplimentare")
-                    
+
                     if windows:
                         file_context_parts.append(f"   - **Ferestre: {len(windows)} bucăți**")
 
@@ -1671,14 +1792,14 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                 # ========================================================
                 if analysis_summary.get("has_dimensions"):
                     file_context_parts.append(f"   - **Dimensiuni:** Plan cotat complet")
-                
+
                 # ✅ NEW: Show ALL materials
                 spec_analysis = analysis_summary.get("specification_analysis", {})
                 if spec_analysis:
                     materials_count = spec_analysis.get("materials_count", 0)
                     if materials_count > 0:
                         file_context_parts.append(f"   - **Materiale identificate: {materials_count} materiale**")
-                        
+
                         specifications = spec_analysis.get("specifications", {})
                         if specifications:
                             materials = specifications.get("material_specifications", [])
@@ -1688,7 +1809,7 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                                     mat_type = mat.get("material_type", "Unknown")
                                     mat_spec = mat.get("specification", "")
                                     file_context_parts.append(f"     • {mat_type}: {mat_spec}")
-                        
+
                     # ✅ NEW: Show ALL finishes
                     finishes_count = spec_analysis.get("finishes_count", 0)
                     if finishes_count > 0:
@@ -1701,87 +1822,165 @@ Răspunde în română, profesional, cu termeni tehnici corecți pentru construc
                                     finish_type = finish.get("finish_type", "Unknown")
                                     finish_spec = finish.get("specification", "")
                                     file_context_parts.append(f"     • {finish_type}: {finish_spec}")
-                
+
                 # ✅ NEW: MEP Components - COMPLETE inventory
                 if analysis_summary.get("has_electrical"):
                     file_context_parts.append(f"   - **Instalații electrice:** Detectate")
                     # TODO Medium-term: Add detailed electrical inventory here
-                    
+
                 if analysis_summary.get("has_hvac"):
                     file_context_parts.append(f"   - **Sistem HVAC:** Detectat")
                     # TODO Medium-term: Add detailed HVAC inventory here
-                
+
                 # ✅ NEW: Dimensions information
                 if analysis_summary.get("has_dimensions"):
                     file_context_parts.append(f"   - **Dimensiuni:** Plan cotat complet")
-            # ✅ NEW: Image file context
-            elif analysis_summary.get("type") == "image":
-                file_context_parts.append(f"   - Format: Floor plan image")
-                
-                room_labels = analysis_summary.get("room_labels_found", 0)
-                if room_labels > 0:
-                    file_context_parts.append(f"   - **Room labels detected: {room_labels}**")
-                
-                confidence = analysis_summary.get("confidence", 0)
-                quality = analysis_summary.get("quality_score", 0)
-                file_context_parts.append(f"   - Analysis confidence: {confidence:.0%}")
-                file_context_parts.append(f"   - Image quality: {quality:.0%}")
-                
-                warnings = analysis_summary.get("warnings", [])
-                if warnings:
-                    file_context_parts.append(f"   - ⚠️ Warnings: {len(warnings)}")
-                    for warning in warnings[:2]:  # Show first 2 warnings
-                        file_context_parts.append(f"     • {warning}")
-            
-            # ✅ COMPLETE PDF analysis
-            elif analysis_summary.get("type") == "pdf":
-                file_context_parts.append(f"   - Format: Document PDF")
-                
-                # ✅ NEW: Check if detailed OCR data is available
-                ocr_result_id = file_ref.get("ocr_result_id")
-                has_full_ocr = file_ref.get("has_full_ocr", False)
-                if has_full_ocr and ocr_result_id:
-                    file_context_parts.append(f"   - **OCR Complet Disponibil:** ID {ocr_result_id}")
-                    # Optional: Add logic here to load full OCR if required by a specific task
-                    # For now, just indicate its availability.
 
-                construction_specs = analysis_summary.get("construction_specs", [])
-                if construction_specs:
-                    file_context_parts.append(f"   - **Specificații tehnice (TOATE {len(construction_specs)}):**")
-                    for spec in construction_specs:  # NO limit
-                        file_context_parts.append(f"     • {spec}")
-                
-                material_refs = analysis_summary.get("material_references", [])
-                if material_refs:
-                    file_context_parts.append(f"   - **Materiale menționate (TOATE {len(material_refs)}):**")
-                    for mat in material_refs:  # NO limit
-                        file_context_parts.append(f"     • {mat}")
-                
-                page_count = analysis_summary.get("page_count", 0)
-                if page_count > 0:
-                    file_context_parts.append(f"   - **Pagini: {page_count}**")
-            
-            # ✅ COMPLETE TXT analysis
-            elif analysis_summary.get("type") == "txt":
-                file_context_parts.append(f"   - Format: Document text")
-                
-                requirements = analysis_summary.get("requirements", [])
-                if requirements:
-                    file_context_parts.append(f"   - **Cerințe identificate (TOATE {len(requirements)}):**")
-                    for req in requirements:  # NO limit
-                        file_context_parts.append(f"     • {req}")
-                
-                client_prefs = analysis_summary.get("client_preferences", {})
-                if client_prefs:
-                    file_context_parts.append(f"   - **Preferințe client:**")
-                    for key, value in client_prefs.items():
-                        file_context_parts.append(f"     • {key}: {value}")
-        
+                # ✅ NEW: Image file context
+                elif analysis_summary.get("type") == "image":
+                    file_context_parts.append(f"   - Format: Floor plan image")
+
+                    room_labels = analysis_summary.get("room_labels_found", 0)
+                    if room_labels > 0:
+                        file_context_parts.append(f"   - **Room labels detected: {room_labels}**")
+
+                    confidence = analysis_summary.get("confidence", 0)
+                    quality = analysis_summary.get("quality_score", 0)
+                    file_context_parts.append(f"   - Analysis confidence: {confidence:.0%}")
+                    file_context_parts.append(f"   - Image quality: {quality:.0%}")
+
+                    warnings = analysis_summary.get("warnings", [])
+                    if warnings:
+                        file_context_parts.append(f"   - ⚠️ Warnings: {len(warnings)}")
+                        for warning in warnings[:2]:  # Show first 2 warnings
+                            file_context_parts.append(f"     • {warning}")
+
+                # ✅ COMPLETE PDF analysis
+                elif analysis_summary.get("type") == "pdf":
+                    file_context_parts.append(f"   - Format: Document PDF")
+
+                    # ✅ NEW: Check if detailed OCR data is available
+                    ocr_result_id = file_doc.get("ocr_result_id")
+                    has_full_ocr = file_doc.get("has_full_ocr", False)
+                    if has_full_ocr and ocr_result_id:
+                        file_context_parts.append(f"   - **OCR Complet Disponibil:** ID {ocr_result_id}")
+                        # Optional: Add logic here to load full OCR if required by a specific task
+                        # For now, just indicate its availability.
+
+                    construction_specs = analysis_summary.get("construction_specs", [])
+                    if construction_specs:
+                        file_context_parts.append(f"   - **Specificații tehnice (TOATE {len(construction_specs)}):**")
+                        for spec in construction_specs:  # NO limit
+                            file_context_parts.append(f"     • {spec}")
+
+                    material_refs = analysis_summary.get("material_references", [])
+                    if material_refs:
+                        file_context_parts.append(f"   - **Materiale menționate (TOATE {len(material_refs)}):**")
+                        for mat in material_refs:  # NO limit
+                            file_context_parts.append(f"     • {mat}")
+
+                    page_count = analysis_summary.get("page_count", 0)
+                    if page_count > 0:
+                        file_context_parts.append(f"   - **Pagini: {page_count}**")
+
+                # ✅ COMPLETE TXT analysis
+                elif analysis_summary.get("type") == "txt":
+                    file_context_parts.append(f"   - Format: Document text")
+
+                    requirements = analysis_summary.get("requirements", [])
+                    if requirements:
+                        file_context_parts.append(f"   - **Cerințe identificate (TOATE {len(requirements)}):**")
+                        for req in requirements:  # NO limit
+                            file_context_parts.append(f"     • {req}")
+
+                    client_prefs = analysis_summary.get("client_preferences", {})
+                    if client_prefs:
+                        file_context_parts.append(f"   - **Preferințe client:**")
+                        for key, value in client_prefs.items():
+                            file_context_parts.append(f"     • {key}: {value}")
+
+            else:
+                # ✅ NEW: MEP Components - COMPLETE inventory
+                if analysis_summary.get("has_electrical"):
+                    file_context_parts.append(f"   - **Instalații electrice:** Detectate")
+                    # TODO Medium-term: Add detailed electrical inventory here
+
+                if analysis_summary.get("has_hvac"):
+                    file_context_parts.append(f"   - **Sistem HVAC:** Detectat")
+                    # TODO Medium-term: Add detailed HVAC inventory here
+
+                # ✅ NEW: Dimensions information
+                if analysis_summary.get("has_dimensions"):
+                    file_context_parts.append(f"   - **Dimensiuni:** Plan cotat complet")
+
+                # ✅ NEW: Image file context
+                elif analysis_summary.get("type") == "image":
+                    file_context_parts.append(f"   - Format: Floor plan image")
+
+                    room_labels = analysis_summary.get("room_labels_found", 0)
+                    if room_labels > 0:
+                        file_context_parts.append(f"   - **Room labels detected: {room_labels}**")
+
+                    confidence = analysis_summary.get("confidence", 0)
+                    quality = analysis_summary.get("quality_score", 0)
+                    file_context_parts.append(f"   - Analysis confidence: {confidence:.0%}")
+                    file_context_parts.append(f"   - Image quality: {quality:.0%}")
+
+                    warnings = analysis_summary.get("warnings", [])
+                    if warnings:
+                        file_context_parts.append(f"   - ⚠️ Warnings: {len(warnings)}")
+                        for warning in warnings[:2]:  # Show first 2 warnings
+                            file_context_parts.append(f"     • {warning}")
+
+                # ✅ COMPLETE PDF analysis
+                elif analysis_summary.get("type") == "pdf":
+                    file_context_parts.append(f"   - Format: Document PDF")
+
+                    # ✅ NEW: Check if detailed OCR data is available
+                    ocr_result_id = file_doc.get("ocr_result_id")
+                    has_full_ocr = file_doc.get("has_full_ocr", False)
+                    if has_full_ocr and ocr_result_id:
+                        file_context_parts.append(f"   - **OCR Complet Disponibil:** ID {ocr_result_id}")
+                        # Optional: Add logic here to load full OCR if required by a specific task
+                        # For now, just indicate its availability.
+
+                    construction_specs = analysis_summary.get("construction_specs", [])
+                    if construction_specs:
+                        file_context_parts.append(f"   - **Specificații tehnice (TOATE {len(construction_specs)}):**")
+                        for spec in construction_specs:  # NO limit
+                            file_context_parts.append(f"     • {spec}")
+
+                    material_refs = analysis_summary.get("material_references", [])
+                    if material_refs:
+                        file_context_parts.append(f"   - **Materiale menționate (TOATE {len(material_refs)}):**")
+                        for mat in material_refs:  # NO limit
+                            file_context_parts.append(f"     • {mat}")
+
+                    page_count = analysis_summary.get("page_count", 0)
+                    if page_count > 0:
+                        file_context_parts.append(f"   - **Pagini: {page_count}**")
+
+                # ✅ COMPLETE TXT analysis
+                elif analysis_summary.get("type") == "txt":
+                    file_context_parts.append(f"   - Format: Document text")
+
+                    requirements = analysis_summary.get("requirements", [])
+                    if requirements:
+                        file_context_parts.append(f"   - **Cerințe identificate (TOATE {len(requirements)}):**")
+                        for req in requirements:  # NO limit
+                            file_context_parts.append(f"     • {req}")
+
+                    client_prefs = analysis_summary.get("client_preferences", {})
+                    if client_prefs:
+                        file_context_parts.append(f"   - **Preferințe client:**")
+                        for key, value in client_prefs.items():
+                            file_context_parts.append(f"     • {key}: {value}")
+
         result = "\n".join(file_context_parts)
         logger.info(f"✅ Built COMPLETE file context: {len(result)} characters")
         return result
     
-    
+        
     def _build_detailed_project_summary(self, context: AgentContext) -> str:
         """Build comprehensive project summary including all extracted data"""
         summary_parts = []
@@ -2203,7 +2402,15 @@ Pentru întrebări sau programarea unei vizite tehnice:
             
             # Consolidate file analyses into the in-memory context.analysis_results object
             consolidated_files = self._consolidate_file_analyses(file_analyses_docs)
-            context.analysis_results = { "file_analysis": consolidated_files }
+
+            # ✅ FIX: Store BOTH consolidated summary AND original file docs
+            context.analysis_results = {
+            "file_analysis": consolidated_files,
+            "file_analyses_docs": file_analyses_docs  # ✅ Keep original docs for detailed descriptions
+            }
+
+            logger.info(f"📂 Loaded {len(file_analyses_docs)} file analysis documents from Firestore")
+            
             
             # FIX [AttributeError]: Access dynamic data from the session's underlying 'data' dictionary
             # The UnifiedSession object has a hybrid structure.
@@ -2297,10 +2504,8 @@ Pentru întrebări sau programarea unei vizite tehnice:
             if not context.project_data.get("total_rooms"):
                 questions.append("Câte camere are proiectul total?")
 
-            # Budget and timeline
-            if not context.project_data.get("budget"):
-                questions.append("Aveți un buget estimat pentru acest proiect?")
-
+            # ✅ REMOVED: Budget question - customers don't have budgets
+            
             # Quality level
             if not context.project_data.get("quality_level"):
                 questions.append("Ce nivel de finisaje doriți: standard, premium sau lux?")
